@@ -44,6 +44,29 @@ class LinkStatus:
     def enabled(self) -> bool:
         return self.state is LinkState.LINKED
 
+    def target_note(self, store_dir: Path) -> str:
+        """补充"它到底指向哪、还归不归本工具管" —— 只有出问题时才有必要说。
+
+        ``linked`` 按定义就指向本 skill 真身，再说一遍是噪音；``absent`` 空位无话可说。
+        断链的 ``resolved`` 是"本该在"的位置，所以同一句话对断链也成立。
+        """
+        if self.state is LinkState.OCCUPIED:
+            return "真目录/真文件占位，不是 skm 建的链接"
+        if self.state not in (LinkState.BROKEN, LinkState.ELSEWHERE) or not self.resolved:
+            return ""
+
+        inside = self.resolved == str(store_dir) or self.resolved.startswith(
+            str(store_dir) + os.sep
+        )
+        if self.state is LinkState.BROKEN:
+            where = ("在仓库内，skm enable --force 可重指" if inside
+                     else "在仓库外，不是本工具的数据")
+            return f"本该指向 {self.resolved}（{where}）"
+        # ELSEWHERE：目标在仓库内时通常是**另一个 skill 的真身**，那绝不能覆盖
+        where = ("在仓库内，是别的 skill 的真身" if inside
+                 else "在仓库外，不是本工具的数据")
+        return f"现在指向 {self.resolved}（{where}）"
+
 
 @dataclass(eq=False)
 class Skill:

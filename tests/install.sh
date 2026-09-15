@@ -63,7 +63,7 @@ printf -- '---\nname: demo\ndescription: 安装验证\n---\n\nbody\n' \
 screen "list 认出 skill" "demo" "$("$H/.local/bin/skm" list)"
 want_ok "enable 成功" "$H/.local/bin/skm" enable demo
 has "链接已建立" "$H/.agents/skills/demo"
-screen "status 显示 linked" "linked" "$("$H/.local/bin/skm" status demo)"
+screen "status 显示已启用" "已启用" "$("$H/.local/bin/skm" status demo)"
 want_ok "disable 成功" "$H/.local/bin/skm" disable demo
 gone "链接已删除" "$H/.agents/skills/demo"
 has "仓库真身保留" "$H/.skill-manager/skills/demo/SKILL.md"

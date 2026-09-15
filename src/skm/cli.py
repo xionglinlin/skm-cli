@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import sys
+import unicodedata
 from pathlib import Path
 from typing import NoReturn
 
@@ -230,7 +233,7 @@ def cmd_list(args) -> int:
         _emit_json(payload)
         return EXIT_OK
 
-    print(style.dim(f"仓库：{snapshot.store_dir}"))
+    print(style.dim(f"仓库：{_tilde(snapshot.store_dir)}"))
     if not skills:
         if snapshot.skills:
             print(style.yellow("没有可显示的 skill"))
@@ -238,7 +241,7 @@ def cmd_list(args) -> int:
             # 空仓库是新用户的第一站：这里必须给出可执行的下一步，而不是一句"没有"。
             # 两种情况都覆盖到 —— 手动拷贝是常规做法，import 是省事的做法。
             print(style.yellow("仓库里还没有 skill"))
-            print(style.dim(f"  放进去：{snapshot.store_dir}/<名字>/SKILL.md"
+            print(style.dim(f"  放进去：{_tilde(snapshot.store_dir)}/<名字>/SKILL.md"
                             f"（分类 = 中间加一层目录）"))
             print(style.dim("  或扫描已有 skill（会搬进仓库并回填链接）：skm import"))
         return EXIT_OK
@@ -309,7 +312,7 @@ def cmd_status(args) -> int:
             # 仓库里有东西，只是被 --enabled / --disabled / --category 滤空了
             print(style.yellow("没有符合筛选条件的 skill"))
             return EXIT_OK
-        print(style.yellow(f"仓库里还没有 skill：{snapshot.store_dir}"))
+        print(style.yellow(f"仓库里还没有 skill：{_tilde(snapshot.store_dir)}"))
         print(style.dim("  放进去：<仓库>/<名字>/SKILL.md；"
                         "或扫描已有 skill：skm import"))
         return EXIT_OK
@@ -317,38 +320,56 @@ def cmd_status(args) -> int:
     for skill in skills:
         mark, note = _mark(style, snapshot, skill)
         print(f"{mark} {style.bold(skill.id)}  {note}")
-        print(style.dim(f"    name        {skill.name}"))
         if skill.description:
-            print(style.dim(f"    description {_clip(skill.description, 100)}"))
-        print(style.dim(f"    path        {skill.dir_path}"))
-        for status in snapshot.links_of(skill):
-            state = status.state
-            colour = style.green if state is LinkState.LINKED else (
-                style.red
-                if state in (LinkState.OCCUPIED, LinkState.ELSEWHERE, LinkState.BROKEN)
-                else style.dim
-            )
-            suffix = f"  {status.detail}" if status.detail else ""
-            print(f"    {status.agent_id:8} {colour(state.value):<12} "
-                  f"{status.link_path}{suffix}")
+            print(style.dim(f"  {_clip(skill.description, _width() - 4)}"))
+        # name 只在"与目录名不一致"时才有信息量 —— 那时它正是 OMP 判定身份用的名字，
+        # 而上面显示的 id 是目录名。一致时不再重复一行。
+        if skill.name != skill.dirname:
+            print(style.dim(f"  name {skill.name}"))
+        print(style.dim(f"  {_tilde(skill.dir_path)}"))
+        _print_links(style, snapshot, skill)
         for warning in skill.warnings:
-            print(style.yellow(f"    ⚠ {warning}"))
+            print(style.yellow(f"  ⚠ {warning}"))
         print()
 
     if snapshot.orphans:
         print(style.bold(style.red("残留链接（指向仓库，但仓库里没有对应 skill）")))
         for orphan in snapshot.orphans:
             state = "断链" if orphan.broken else "有效"
-            print(f"  {orphan.agent_id:8} {orphan.link_path}  → {orphan.target}  [{state}]")
+            note = _conflict_note(snapshot.conflicts, orphan.link_path)
+            print(f"  {orphan.agent_id:6} {_tilde(orphan.link_path)}  [{state}]")
+            print(style.dim(f"         → {orphan.target}{note}"))
         print(style.dim("  清理：skm issues --fix"))
         print()
 
-    if snapshot.conflicts:
+    # 冲突分三类，各自出现在最合适的位置，不重复：
+    #   1. 位置就是**选中 skill** 的链接位 —— 上面逐条状态已如实显示，这里只报数；
+    #   2. 仓库内部的重名（与具体位置无关）—— 在这里列出来；
+    #   3. 属于本次没选中的 skill —— 只提示还有多少，不喧宾夺主。
+    shown_paths = {st.link_path for skill in skills for st in snapshot.links_of(skill)}
+    inside_listing = [c for c in snapshot.conflicts if c.path in shown_paths]
+    repo_wide = [c for c in snapshot.conflicts if not c.agent_id]
+    elsewhere = [c for c in snapshot.conflicts
+                 if c.agent_id and c.path not in shown_paths]
+
+    if repo_wide:
         print(style.bold(style.red("冲突（不会被自动覆盖）")))
-        for conflict in snapshot.conflicts:
-            where = f"{conflict.agent_id}:" if conflict.agent_id else ""
-            print(f"  [{conflict.kind}] {where}{conflict.path}")
+        for conflict in repo_wide:
+            print(f"  [{conflict.kind}] {conflict.path}")
             print(style.dim(f"      {conflict.message}"))
+        print()
+
+    notes = []
+    if inside_listing:
+        notes.append(f"{len(inside_listing)} 处冲突已在上面标出（详见 skm issues）")
+        # "别处还有冲突"只在本次结果**本身**已经出了问题才提：否则查一个干净的
+        # skill 也会被无关的告警打扰，反而让人以为它有问题。
+        if elsewhere:
+            notes.append(f"另有 {len(elsewhere)} 处冲突在未列出的 skill 上")
+    for note in notes:
+        for line in _wrap(note, _width() - 2):
+            print(style.dim(f"  {line}"))
+    if notes:
         print()
 
     for warning in snapshot.warnings:
@@ -362,9 +383,167 @@ def cmd_status(args) -> int:
     return EXIT_OK
 
 
+def _width(default: int = 100) -> int:
+    """输出宽度上限。终端更窄时以终端为准 —— 换行交给终端会破坏缩进对齐。"""
+    try:
+        return min(shutil.get_terminal_size().columns, default) - 1
+    except OSError:
+        return default - 1
+
+
+def _tilde(path: Path) -> str:
+    """``$HOME`` 缩写成 ``~``：状态行的主体是位置，长前缀只会挤掉有用信息。"""
+    return _shrink_paths(str(path))
+
+
+def _shrink_paths(text: str) -> str:
+    """把文本里的家目录前缀缩成 ``~``（按路径边界匹配，不会误伤 ``/home/u2``）。"""
+    home = os.path.expanduser("~")
+    if not home or home == "/":
+        return text
+    return re.sub(re.escape(home) + r"(?=[/\\]|$)", "~", text)
+
+
+#: 折行时可以在这些字符**之后**断开：路径分隔符、空白、以及中文里本就成词的标点。
+#: 特意**不含**开括号 —— 在 ``（`` 后断会让括号独占行尾。
+_BREAK_AFTER = frozenset("/ \\、，,；;·—")
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """按**显示宽度**折行。优先在空格/路径分隔符处断，实在没有断点才按列硬切。
+
+    交给终端自动折行会破坏缩进对齐（续行从第 0 列开始），所以这里自己折。
+    """
+    if width <= 0 or _display_width(text) <= width:
+        return [text]
+
+    lines: list[str] = []
+    current = ""
+    for chunk in _chunks(text):
+        if _display_width(current + chunk) <= width:
+            current += chunk
+            continue
+        if current.strip():
+            lines.append(current.rstrip())
+        current = chunk.lstrip()
+        # 单个片段就超宽（很长的路径名，中间没有断点）：按列硬切
+        while _display_width(current) > width:
+            head, current = _cut_at(current, width)
+            lines.append(head)
+    if current.strip():
+        lines.append(current.rstrip())
+    return [_avoid_orphan(line) for line in lines]
+
+
+def _avoid_orphan(line: str) -> str:
+    """不让行尾留下孤零零的开括号（``…project（`` 后面本该跟着内容）。"""
+    stripped = line.rstrip()
+    if stripped and stripped[-1] in "（(":
+        return stripped[:-1].rstrip()
+    return stripped
+
+
+def _chunks(text: str) -> list[str]:
+    """切成"片段 + 其后的断点"，断点保留在前一片段里（``/tmp/`` 不会被拆开）。"""
+    chunks: list[str] = []
+    current = ""
+    for char in text:
+        current += char
+        if char in _BREAK_AFTER:
+            chunks.append(current)
+            current = ""
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _cut_at(text: str, width: int) -> tuple[str, str]:
+    """在显示宽度 ``width`` 处切开，返回 ``(前半, 后半)``，不拆散 2 列宽字符。"""
+    taken = 0
+    for index, char in enumerate(text):
+        size = 2 if unicodedata.east_asian_width(char) in "WF" else 1
+        if taken + size > width:
+            return text[:index], text[index:]
+        taken += size
+    return text, ""
+
+
+def _conflict_note(conflicts: list[scan.Conflict], path: Path) -> str:
+    """该位置对应的冲突说明（残留链接用：有效或断链本身还不足以说明问题）。"""
+    for conflict in conflicts:
+        if conflict.path == path:
+            return f"  {conflict.message}"
+    return ""
+
+
+def _print_links(style: Style, snapshot: scan.Snapshot, skill: Skill) -> None:
+    """逐条位置。缩进按**显示宽度**算 —— 中文/框线字形的列宽与 ``len`` 不等。"""
+    statuses = snapshot.links_of(skill)
+    if not statuses:
+        print(style.dim("  没有可写的 agent 目录（检查配置与目录是否存在）"))
+        return
+
+    agent_width = max(len(st.agent_id) for st in statuses)
+    # 状态列用固定宽度：全局取最宽的那个状态名，这样多个 skill 块之间缩进一致，
+    # 不会因为某块恰好只有"已启用"而整体左移、看起来像没对齐。
+    state_width = max(_display_width(label) for _, label in _STATE_LABELS.values())
+    # 行首：`  ␣ 枝干 agent  状态  ` —— 枝干 4 列、"字形+空格" 2 列
+    indent = 2 + 4 + 2 + agent_width + 2 + state_width + 2
+
+    for index, status in enumerate(statuses):
+        last = index == len(statuses) - 1
+        branch = "└── " if last else "├── "
+        glyph, label = _state_label(status.state)
+        colour = _state_style(style, status.state)
+        print(f"  {branch}{colour(glyph)} {status.agent_id.ljust(agent_width)}  "
+              f"{colour(_pad(label, state_width))}  {_tilde(status.link_path)}")
+        note = status.target_note(snapshot.store_dir)
+        if note:
+            # 续行的竖线要落在枝干正下方（第 2 列），才能看出它属于上一条
+            stem = "  " + ("│" if not last else " ") + "  "
+            pad = " " * (indent - len(stem))
+            for line in _wrap(_shrink_paths(note), _width() - indent):
+                print(style.dim(f"{stem}{pad}{line}"))
+
+
+#: 字形 + 中文状态名。英文枚举（linked/occupied…）留给 ``--json``，界面上不用。
+_STATE_LABELS: dict[LinkState, tuple[str, str]] = {
+    LinkState.LINKED: ("✓", "已启用"),
+    LinkState.ABSENT: ("·", "未启用"),
+    LinkState.BROKEN: ("✗", "断链"),
+    LinkState.ELSEWHERE: ("✗", "指向别处"),
+    LinkState.OCCUPIED: ("✗", "被占位"),
+}
+
+
+def _state_label(state: LinkState) -> tuple[str, str]:
+    return _STATE_LABELS[state]
+
+
+def _state_style(style: Style, state: LinkState):
+    if state is LinkState.LINKED:
+        return style.green
+    if state in (LinkState.OCCUPIED, LinkState.ELSEWHERE, LinkState.BROKEN):
+        return style.red
+    return style.dim
+
+
+def _pad(text: str, width: int) -> str:
+    """按**显示宽度**补齐（中文占 2 列），否则中文状态名会让整列错位。"""
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _display_width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
 def _clip(text: str, limit: int) -> str:
+    """按**显示宽度**截断（中文占 2 列）。用 ``len`` 算会把中文当半个字宽，导致溢出。"""
     single = " ".join(text.split())
-    return single if len(single) <= limit else single[: limit - 1] + "…"
+    if _display_width(single) <= limit:
+        return single
+    head, _ = _cut_at(single, max(1, limit - 1))
+    return head.rstrip() + "…"
 
 
 def _run_write(args, *, enable: bool) -> int:
@@ -375,7 +554,7 @@ def _run_write(args, *, enable: bool) -> int:
         print("没有选中任何 skill（用 --all 表示全部）", file=sys.stderr)
         return EXIT_USAGE
     if not snapshot.store_dir.is_dir():
-        print(f"仓库目录不存在：{snapshot.store_dir}", file=sys.stderr)
+        print(f"仓库目录不存在：{_tilde(snapshot.store_dir)}", file=sys.stderr)
         return EXIT_PROBLEM
 
     targets = _resolve_targets(snapshot, args)
@@ -428,7 +607,7 @@ def cmd_agents(args) -> int:
         return EXIT_OK
 
     print(style.dim(f"配置文件：{cfg.path or '（无，使用内置默认）'}"))
-    print(style.dim(f"仓库：    {cfg.store_dir}"))
+    print(style.dim(f"仓库：    {_tilde(cfg.store_dir)}"))
     print()
     for agent in cfg.agents:
         state = style.green("目录存在") if agent.present else style.yellow("目录不存在")
@@ -437,7 +616,7 @@ def cmd_agents(args) -> int:
             flags.append("共享")
         if not agent.enabled:
             flags.append(style.yellow("已停用"))
-        print(f"  {agent.id:8} {agent.name}  {style.dim(str(agent.dir))}")
+        print(f"  {agent.id:8} {agent.name}  {style.dim(_tilde(agent.dir))}")
         print(f"           {state}" + (f"  ({'、'.join(flags)})" if flags else ""))
     print()
     print(style.dim("新增 agent：编辑配置文件里的 [[agents]]（skm config path 显示位置）"))
@@ -513,9 +692,9 @@ def cmd_import(args) -> int:
 
     plan = importer.plan(cfg, roots, category=args.category, copy=args.copy)
     for warning in plan.warnings:
-        print(style.yellow(f"⚠ {warning}"), file=sys.stderr)
+        print(style.yellow(f"⚠ {_shrink_paths(warning)}"), file=sys.stderr)
     for path, reason in plan.ignored:
-        print(style.dim(f"  忽略 {path}（{reason}）"), file=sys.stderr)
+        print(style.dim(f"  忽略 {_tilde(path)}（{reason}）"), file=sys.stderr)
 
     records: list[importer.Record] = []
     execute = args.yes and not args.dry_run
@@ -523,7 +702,7 @@ def cmd_import(args) -> int:
         try:
             records = importer.execute(plan, copy=args.copy)
         except OSError as exc:
-            print(f"无法创建仓库目录 {cfg.store_dir}：{exc.strerror or exc}",
+            print(f"无法创建仓库目录 {_tilde(cfg.store_dir)}：{exc.strerror or exc}",
                   file=sys.stderr)
             return EXIT_PROBLEM
 
@@ -531,9 +710,9 @@ def cmd_import(args) -> int:
         _emit_json(_import_payload(plan, records))
         return EXIT_PROBLEM if _import_problems(plan, records) else EXIT_OK
 
-    print(style.dim(f"仓库：{cfg.store_dir}"))
+    print(style.dim(f"仓库：{_tilde(cfg.store_dir)}"))
     print(style.dim("扫描：" + "、".join(
-        str(root.path) if root.explicit else f"{root.origin}（{root.path}）"
+        _tilde(root.path) if root.explicit else f"{root.origin}（{_tilde(root.path)}）"
         for root in roots
     )))
     print()
@@ -654,12 +833,13 @@ def cmd_issues(args) -> int:
 
     for orphan in snapshot.orphans:
         state = "断链" if orphan.broken else "有效"
-        print(f"{style.yellow('[残留链接]')} {orphan.agent_id} {orphan.link_path} "
-              f"→ {orphan.target}  [{state}]")
+        print(f"{style.yellow('[残留链接]')} {orphan.agent_id}")
+        print(f"    {_tilde(orphan.link_path)} → {_shrink_paths(orphan.target)}  [{state}]")
     for conflict in snapshot.conflicts:
-        where = f"{conflict.agent_id}:" if conflict.agent_id else ""
-        print(f"{style.red('[' + conflict.kind + ']')} {where}{conflict.path}")
-        print(style.dim(f"    {conflict.message}"))
+        where = f"{conflict.agent_id}  " if conflict.agent_id else ""
+        print(f"{style.red('[' + _conflict_label(conflict.kind) + ']')} {where}"
+              f"{_tilde(conflict.path)}")
+        print(style.dim(f"    {_shrink_paths(conflict.message)}"))
 
     if not args.fix:
         print()
@@ -673,7 +853,7 @@ def cmd_issues(args) -> int:
         # 只删指向仓库的链接（scan 已经确认过目标在仓库内），绝不递归、不碰真目录
         outcome = actions.remove_orphan(orphan.link_path)
         print(f"  {style.green('已删除') if outcome.changed else style.yellow(outcome.result.value)}"
-              f"  {orphan.agent_id:8} {orphan.link_path}")
+              f"  {orphan.agent_id:8} {_tilde(orphan.link_path)}")
         if outcome.detail and not outcome.changed:
             print(style.dim(f"        {outcome.detail}"))
         if outcome.result in (actions.Result.REFUSED, actions.Result.FAILED):
@@ -683,6 +863,22 @@ def cmd_issues(args) -> int:
         # 冲突也算未解决：脚本据此判断"这台机器是否干净"
         problems += len(snapshot.conflicts)
     return EXIT_PROBLEM if problems else EXIT_OK
+
+
+#: 冲突类别 -> 中文名。``kind`` 是给 ``--json`` 用的稳定标识，界面上不用露英文。
+_CONFLICT_LABELS = {
+    "occupied": "被占位",
+    "elsewhere": "指向别处",
+    "broken": "断链",
+    "link_name_collision": "目录名撞车",
+    "display_name_collision": "name 撞车",
+    "dir_mismatch": "目录名不一致",
+    "name_collision": "重名",
+}
+
+
+def _conflict_label(kind: str) -> str:
+    return _CONFLICT_LABELS.get(kind, kind)
 
 
 # --------------------------------------------------------------------------
@@ -851,6 +1047,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="例：skm list\n"
                "    skm list --enabled\n"
                "    skm list --disabled 'qt-*'\n"
+               "    skm list --category security-skills --json\n"
                "    skm list --category security-skills --json",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -866,6 +1063,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="例：skm status pdf\n"
                "    skm status pdf qt-qml docx\n"
                "    skm status --category qt-skills\n"
+
                "    skm status pdf --json",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -895,6 +1093,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="例：skm enable pdf\n"
                "    skm enable pdf docx qt-qml\n"
                "    skm enable --category qt-skills\n"
+
                "    skm enable 'dbus-*'        （glob）\n"
                "    skm enable --all\n"
                "    skm enable --all --disabled  只启用还没启用的\n"
@@ -915,6 +1114,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="例：skm disable pdf\n"
                "    skm disable pdf qt-qml\n"
                "    skm disable --category security-skills\n"
+
                "    skm disable --all\n"
                "    skm disable pdf --agent codex   只停用某个 agent 的链接\n"
                "    skm disable qt-qml -n           预演，不实际改\n"

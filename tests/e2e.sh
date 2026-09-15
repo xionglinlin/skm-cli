@@ -81,8 +81,9 @@ assert_true "链接指向仓库真身" test "$(readlink "$HOME/.agents/skills/sk
 out=$("$SKM" enable skill-two); check "重复启用为幂等" "未改动" "$out"
 
 echo "== status：单查；批量查"
-out=$("$SKM" status skill-two); check "显示 linked" "linked" "$out"
-check "显示 description" "description" "$out"
+out=$("$SKM" status skill-two); check "显示已启用" "已启用" "$out"
+check "显示 description" "test skill skill-two" "$out"
+check "显示真身位置" "skills/skill-two" "$out"
 out=$("$SKM" status); check "批量查缺省列全部" "skill-one" "$out"
 
 echo "== 目标目录不存在则跳过，不创建 =="
@@ -104,8 +105,9 @@ rm -f "$HOME/.agents/skills/skill-three"
 mkdir "$HOME/.agents/skills/skill-three"
 echo occupancy >"$HOME/.agents/skills/skill-three/keep.txt"
 out=$("$SKM" enable cat-a/skill-three); check "拒绝覆盖真目录" "拒绝" "$out"
-check "issues 报告 occupied" "occupied" "$("$SKM" issues)"
-check "status 报告 occupied" "occupied" "$("$SKM" status cat-a/skill-three)"
+check "issues 报告被占位（中文）" "[被占位]" "$("$SKM" issues)"
+check "issues --json 保留稳定标识" '"kind": "occupied"' "$("$SKM" issues --json)"
+check "status 报告被占位" "被占位" "$("$SKM" status cat-a/skill-three)"
 out=$("$SKM" issues --fix); refute "issues --fix 不碰真目录" "已删除" "$out"
 assert_true "真目录内容完好" test -f "$HOME/.agents/skills/skill-three/keep.txt"
 
@@ -274,6 +276,48 @@ out=$(SKM_BASE_DIR="$T4/repo" HOME="$T4/home" "$SKM" import 2>&1)
 check "占位时拒绝收编" "拒绝" "$out"
 check "说明搬走会让 agent 读不到" "读不到这个 skill" "$out"
 assert_true "被拒后源真身未动" test -f "$T4/home/.agents/skills/cat/pdf/SKILL.md"
+
+echo "== status 显示契约（中文状态、~ 缩写、宽度、区间作用域）=="
+# 这些是显示层真实易错的点：宽字符对齐、家目录缩写、超宽折行、冲突计数作用域。
+T5=$(mktemp -d /tmp/skm-e2e-fmt-XXXXXX)
+export SKM_BASE_DIR="$T5/repo"; export HOME="$T5/home"
+mkdir -p "$HOME/.agents/skills" "$SKM_BASE_DIR/skills"
+mk_skill5() { # $1 = 仓库内相对路径
+  local p="$SKM_BASE_DIR/skills/$1"; mkdir -p "$p"; local n; n=$(basename "$p")
+  printf -- '---\nname: %s\ndescription: 中文描述%s，用来验证宽字符列宽\n---\n' "$n" "$n" >"$p/SKILL.md"
+}
+mk_skill5 alpha; mk_skill5 cat-b/beta
+"$SKM" enable --all >/dev/null
+# 让 beta 在 omp 上被真目录占住
+rm -f "$HOME/.agents/skills/beta"; mkdir "$HOME/.agents/skills/beta"
+
+out=$("$SKM" status alpha)
+check "状态用中文（不含英文枚举）" "已启用" "$out"
+refute "界面不出现 linked 枚举" "linked" "$out"
+check "家目录缩写为 ~" "~/.agents/skills/alpha" "$out"
+refute "不再显示绝对家目录路径" "$HOME/.agents/skills/alpha" "$out"
+check "显示真身位置" "skills/alpha" "$out"
+check "name 与目录名一致时不重复显示 name 行" "已启用" "$out"
+
+# 超宽输出应折行而不是溢出：所有行不超过终端宽度
+long=$("$SKM" status beta)
+assert_true "输出不超宽（COLUMNS=60）" bash -c "COLUMNS=60 '$SKM' status | awk 'length(\$0)>60 {exit 1}'"
+check "长文本折行后仍在缩进内" "被占位" "$long"
+
+# 冲突计数只统计本次列出的 skill
+out=$("$SKM" status alpha)
+refute "单查时不误报未列出 skill 的冲突" "属于本次未列出的 skill" "$out"
+out=$("$SKM" status)
+check "全量查询报出冲突数" "处冲突已在上面标出" "$out"
+
+# 折行：超宽内容必须自己折行（不能让终端折，否则续行从第 0 列开始、缩进全乱）
+assert_true "窄终端下没有行超宽（COLUMNS=64）" bash -c \
+  "COLUMNS=64 '$SKM' status | awk 'length(\$0)>64 {exit 1}'"
+check "窄终端下仍能看清状态" "被占位" "$(COLUMNS=64 "$SKM" status beta)"
+
+echo "== 筛选滤空 vs 仓库真空（提示不同）=="
+check "滤空时提示筛选" "没有符合筛选条件" "$("$SKM" status --enabled --category nope)"
+check "滤空时 list 提示筛选" "没有可显示的 skill" "$("$SKM" list --category nope)"
 
 # 恢复主场景的环境，后续用例继续用
 export SKM_BASE_DIR="$T/repo"; export HOME="$T/home"
