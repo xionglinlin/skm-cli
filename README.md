@@ -57,23 +57,39 @@ skm 的取舍是：**真身只有一份，放在你自己的仓库里；对 agen
 ```bash
 git clone https://github.com/xionglinlin/skm-cli.git
 cd skm-cli
-bash install.sh                 # 默认软链到 ~/.local/bin
+bash install.sh
 ```
+
+默认是**自包含安装**：实现会被复制进 `~/.skill-manager`，命令指向那份副本。
+**安装完成后源码目录即可删除**，功能不受影响。
+
+安装后的布局：
+
+```text
+~/.local/bin/skm            → 软链，指向 ~/.skill-manager/bin/skm
+~/.skill-manager/
+  bin/skm                   启动脚本（副本）
+  lib/skm/                  实现（副本）—— 删掉源码目录不影响使用
+  skills/                   你的 skill 仓库（安装/卸载都不动它）
+  config.toml               配置（安装/卸载都不动它）
+```
+
+其它用法：
 
 ```bash
-# 其它模式
-bash install.sh --binary        # 自包含安装，之后可删掉克隆目录
-bash install.sh --copy          # 生成包装脚本（不依赖 PATH 里的软链）
-bash install.sh --dir ~/bin     # 装到别的目录
-bash install.sh --repo ~/my-skills   # 换个仓库位置并生成配置
-bash install.sh --uninstall     # 卸载（默认不动数据目录）
+bash install.sh --bin-dir ~/bin        # 命令放别处
+bash install.sh --base-dir ~/my-skills # 实现与数据放别处
+bash install.sh --dev                  # 开发模式：命令软链到克隆目录
+bash install.sh --pipx                 # 用 pipx 装成隔离的独立包
+bash install.sh --uninstall            # 卸载程序，保留 skills/ 与 config.toml
+bash install.sh --uninstall --purge    # 连数据一起删（需再加 --yes 确认）
 ```
 
-`--link` 模式装的是符号链接，所以升级只需：
+**升级**：在源码目录 `git pull` 后重新运行 `bash install.sh`（会覆盖 `bin/` 与 `lib/`，
+你的 `skills/` 与 `config.toml` 不受影响）。
 
-```bash
-cd skm-cli && git pull
-```
+**开发模式**（`--dev`）例外：它把命令软链到克隆目录，改代码立即生效，
+但**依赖源码目录存在**，删掉源码后 skm 会不可用 —— 日常使用请用默认安装。
 
 ### 方式二：pipx（隔离的独立包）
 
@@ -91,28 +107,31 @@ git clone https://github.com/xionglinlin/skm-cli.git
 ./skm-cli/bin/skm list
 ```
 
+这种方式直接跑源码树里的脚本（会自动识别为源码布局），适合试用。
+
 ## 快速开始
 
-```bash
-# 1. 首次生成配置文件（可选；不生成也能用内置默认值）
-skm config init
+安装脚本已经建好仓库并生成配置，直接放 skill 即可：
 
-# 2. 把 skill 放进仓库
+```bash
+# 1. 把 skill 放进仓库
 mkdir -p ~/.skill-manager/skills/pdf
 cp -r /path/to/pdf-skill/* ~/.skill-manager/skills/pdf/     # 需含 SKILL.md
 
 # 分类就是中间加一层目录
 mkdir -p ~/.skill-manager/skills/qt-skills/qt-qml
 
-# 3. 看看仓库里有什么、现在什么状态
+# 2. 看看仓库里有什么、现在什么状态
 skm list
 
-# 4. 启用
+# 3. 启用
 skm enable pdf
 skm enable --category qt-skills
 
-# 5. 重启 agent 生效（skill 在启动时发现）
+# 4. 重启 agent 生效（skill 在启动时发现）
 ```
+
+> 用的是「方式三：不安装，直接跑」时，先执行一次 `skm config init` 生成配置。
 
 ## 命令一览
 
@@ -237,7 +256,7 @@ $ skm agents
 
 ```bash
 bash tests/e2e.sh        # 56 项：CLI 行为端到端（临时 HOME，不碰真实数据）
-bash tests/install.sh    # 45 项：安装/卸载/各安装方式（离线，临时 HOME）
+bash tests/install.sh    # 60 项：安装/卸载/各安装方式（离线，临时 HOME）
 ```
 
 源码结构：
@@ -249,6 +268,8 @@ src/skm/
   actions.py   写操作：建链 / 删链（含全部安全判定）
   config.py    配置读写
   cli.py       命令行
+bin/skm        启动脚本：定位实现（<ROOT>/lib/skm 或 <ROOT>/src/skm）后交给 python3
+install.sh     安装/卸载：默认把 src/skm 复制到 <BASE_DIR>/lib/skm
 ```
 
 ## 许可

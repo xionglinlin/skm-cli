@@ -3,15 +3,14 @@
 #
 # 用法：bash tests/install.sh
 #
-# 每个安装方式都用一个临时 HOME，验证：命令可用、数据目录不被擅动、
-# 重复执行幂等、卸载干净（含 --binary 的自包含目录）、错误参数被拒绝。
+# 重点验证「自包含」这一契约：安装后删掉源码目录，skm 仍必须可用。
+# 每个用例都用独立临时 HOME，绝不碰真实 ~/.local/bin 与 ~/.skill-manager。
 set -uo pipefail
 
-# 以本仓库为源码；bin/skm 会按自身位置推导 ROOT，因此这里必须复制后再测，
-# 否则 "删掉源码目录仍可用" 这类用例会误伤工作区。
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# 以本仓库为源码。bin/skm 会按自身位置推导实现目录，而安装逻辑也会把源码复制走，
+# 所以每个用例都用源码副本，避免用例之间互相污染、也不会误伤工作区。
+REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK=$(mktemp -d /tmp/skm-install-test-XXXXXX)
-SRC="$WORK/src"
 
 pass=0; fail=0
 ok()    { pass=$((pass+1)); echo "  ✓ $1"; }
@@ -20,34 +19,44 @@ want_ok()  { if "${@:2}" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
 want_err() { if "${@:2}" >/dev/null 2>&1; then bad "$1"; else ok "$1"; fi; }
 has()   { if [ -e "$2" ] || [ -L "$2" ]; then ok "$1"; else bad "$1"; fi; }
 gone()  { if [ -e "$2" ] || [ -L "$2" ]; then bad "$1"; else ok "$1"; fi; }
-hasnt() { gone "$@"; }
 screen(){ if grep -qF -- "$2" <<<"$3"; then ok "$1"; else bad "$1"; echo "$3" | sed 's/^/      /'; fi; }
 
-cp -r "$ROOT" "$SRC"
-rm -rf "$SRC/.git"          # 只留文件，避免误把用例绑在 git 状态上
+src_copy() { # $1 = 目标目录；返回可用的源码副本
+  cp -r "$REPO" "$1"
+  rm -rf "$1/.git"
+  echo "$1"
+}
 newhome() { mktemp -d "$WORK/home-XXXXXX"; }
 
-echo "源码：$SRC"
+echo "源码：$REPO"
 echo "工作目录：$WORK"
 
-# ---------------------------------------------------------------- --link
+# ---------------------------------------------------------------- 默认：自包含
 echo
-echo "== --link（默认）=="
+echo "== 默认安装：自包含 =="
+SRC=$(src_copy "$WORK/src-default")
 H=$(newhome); export HOME="$H"
-out=$(cd "$SRC" && bash install.sh --link 2>&1)
-screen "报告已软链" "已软链" "$out"
+out=$(cd "$SRC" && bash install.sh 2>&1)
+screen "报告自包含安装" "自包含" "$out"
+screen "实现装进 ~/.skill-manager/lib" "$H/.skill-manager/lib/skm" "$out"
+has "实现已落在 lib/skm/cli.py" "$H/.skill-manager/lib/skm/cli.py"
+has "启动脚本已落在 bin/skm" "$H/.skill-manager/bin/skm"
 has "命令已就位" "$H/.local/bin/skm"
+has "仓库目录已建" "$H/.skill-manager/skills"
+has "配置已生成" "$H/.skill-manager/config.toml"
+screen "命令指向 BASE_DIR 而不是源码" "$H/.skill-manager/bin/skm" "$(readlink "$H/.local/bin/skm")"
 want_ok "skm --version 可运行" "$H/.local/bin/skm" --version
 screen "版本号正确" "skm 0.1.0" "$("$H/.local/bin/skm" --version)"
-want_ok "skm list 可运行" "$H/.local/bin/skm" list
-screen "缺配置时用内置默认" "使用内置默认" "$("$H/.local/bin/skm" agents)"
-gone "未擅自生成配置文件" "$H/.skill-manager/config.toml"
 
-out=$(cd "$SRC" && bash install.sh --link 2>&1)
-screen "重复安装不报错" "已软链" "$out"
-want_ok "重复安装后仍可运行" "$H/.local/bin/skm" --version
+echo "  -- 关键契约：删掉源码目录后仍可用 --"
+rm -rf "$SRC"
+gone "源码目录已删除" "$SRC"
+want_ok "删源码后 skm --version 仍可用" "$H/.local/bin/skm" --version
+want_ok "删源码后 skm list 仍可用" "$H/.local/bin/skm" list
+want_ok "删源码后 skm agents 仍可用" "$H/.local/bin/skm" agents
+has "删源码后仍不影响数据" "$H/.skill-manager/config.toml"
 
-echo "  -- 装上就能干活（建仓库 → 启用 → 停用）--"
+echo "  -- 装上就能干活 --"
 mkdir -p "$H/.agents/skills" "$H/.skill-manager/skills/demo"
 printf -- '---\nname: demo\ndescription: 安装验证\n---\n\nbody\n' \
   >"$H/.skill-manager/skills/demo/SKILL.md"
@@ -59,74 +68,115 @@ want_ok "disable 成功" "$H/.local/bin/skm" disable demo
 gone "链接已删除" "$H/.agents/skills/demo"
 has "仓库真身保留" "$H/.skill-manager/skills/demo/SKILL.md"
 
-# ---------------------------------------------------------------- --copy
-echo
-echo "== --copy（包装脚本）=="
-H=$(newhome); export HOME="$H"
-out=$(cd "$SRC" && bash install.sh --copy 2>&1)
-screen "报告已写入包装脚本" "已写入包装脚本" "$out"
-screen "是脚本而非软链" 'exec "' "$(cat "$H/.local/bin/skm")"
-want_ok "包装脚本可运行" "$H/.local/bin/skm" --version
+echo "  -- 幂等与升级 --"
+SRC=$(src_copy "$WORK/src-again")
+out=$(cd "$SRC" && bash install.sh 2>&1)
+screen "重复安装不报错" "安装完成" "$out"
+has "重复安装后配置仍在" "$H/.skill-manager/config.toml"
+# 模拟升级：改动副本里的实现，重装后应生效
+sed -i 's/^__version__ = .*/__version__ = "9.9.9"/' "$SRC/src/skm/__init__.py"
+(cd "$SRC" && bash install.sh >/dev/null 2>&1)
+screen "重装后新版本生效（升级路径）" "skm 9.9.9" "$("$H/.local/bin/skm" --version)"
+sed -i 's/^__version__ = .*/__version__ = "0.1.0"/' "$SRC/src/skm/__init__.py"
 
-# ---------------------------------------------------------------- --binary
-echo
-echo "== --binary（自包含：删掉源码目录后仍可用）=="
-H=$(newhome); export HOME="$H"
-HAS_SRC="$WORK/src-binary"; cp -r "$SRC" "$HAS_SRC"
-out=$(cd "$HAS_SRC" && bash install.sh --binary 2>&1)
-screen "报告自包含安装" "自包含安装" "$out"
-has "自包含目录已创建" "$H/.local/bin/skm-cli/src/skm/cli.py"
-want_ok "安装后可运行" "$H/.local/bin/skm" --version
-rm -rf "$HAS_SRC"
-gone "源码目录已删除" "$HAS_SRC"
-want_ok "删掉源码后仍可运行" "$H/.local/bin/skm" --version
-want_ok "删掉源码后 list 仍可运行" "$H/.local/bin/skm" list
+echo "  -- 旧实现残留不应被带进新安装 --"
+SRC=$(src_copy "$WORK/src-pyc")
+mkdir -p "$SRC/src/skm/__pycache__"; touch "$SRC/src/skm/__pycache__/stale.pyc"
+(cd "$SRC" && bash install.sh >/dev/null 2>&1)
+gone "已清理 __pycache__" "$H/.skill-manager/lib/skm/__pycache__"
 
-# ---------------------------------------------------------------- --dir / --repo
+# ---------------------------------------------------------------- --dev
 echo
-echo "== --dir 与 --repo =="
+echo "== --dev：软链到源码（改动立即生效，但依赖源码）=="
+SRC=$(src_copy "$WORK/src-dev")
 H=$(newhome); export HOME="$H"
-out=$(cd "$SRC" && bash install.sh --link --dir "$H/mybin" 2>&1)
-screen "装到自定义目录" "mybin/skm" "$out"
-has "自定义目录里的命令" "$H/mybin/skm"
-out=$(cd "$SRC" && bash install.sh --link --dir "$H/mybin" --repo "$H/myrepo" 2>&1)
-screen "生成了自定义仓库的配置" "已生成配置" "$out"
-has "自定义仓库目录" "$H/myrepo/skills"
-screen "配置指向自定义仓库" "$H/myrepo" "$(grep -F base_dir "$H/myrepo/config.toml")"
+out=$(cd "$SRC" && bash install.sh --dev 2>&1)
+screen "报告开发模式" "开发模式" "$out"
+want_ok "skm 可运行" "$H/.local/bin/skm" --version
+screen "命令指向源码目录" "$SRC/bin/skm" "$(readlink "$H/.local/bin/skm")"
+screen "已提示依赖源码" "删掉源码后 skm 将不可用" "$out"
+# 注意：这里用长度不同的版本号。CPython 的 pyc 校验只看「整数秒 mtime + 文件大小」，
+# 同一秒内做等长修改会被判定为未变更而复用旧字节码（Python 固有行为，非本工具问题）。
+sed -i 's/^__version__ = .*/__version__ = "9.9.800"/' "$SRC/src/skm/__init__.py"
+screen "改源码立即生效" "skm 9.9.800" "$("$H/.local/bin/skm" --version)"
 
-# ---------------------------------------------------------------- 错误处理
+# ---------------------------------------------------------------- --bin-dir / --base-dir
+echo
+echo "== --bin-dir 与 --base-dir =="
+SRC=$(src_copy "$WORK/src-dirs")
+H=$(newhome); export HOME="$H"
+out=$(cd "$SRC" && bash install.sh --bin-dir "$H/mybin" --base-dir "$H/mydata" 2>&1)
+screen "命令装到自定义 bin" "mybin/skm" "$out"
+has "自定义 bin 里的命令" "$H/mybin/skm"
+has "实现装到自定义 base" "$H/mydata/lib/skm/cli.py"
+screen "配置指向自定义 base" "$H/mydata" "$(grep -F base_dir "$H/mydata/config.toml")"
+want_ok "自定义布局可运行" "$H/mybin/skm" --version
+
+# ---------------------------------------------------------------- 参数与前置条件
 echo
 echo "== 参数与前置条件 =="
 H=$(newhome)
-screen "未知参数被拒绝" "未知参数" "$(cd "$SRC" && HOME="$H" bash install.sh --bogus 2>&1)"
-want_ok "--help 可用" env HOME="$H" bash "$SRC/install.sh" --help
-screen "--help 列出卸载" "uninstall" "$(cd "$SRC" && HOME="$H" bash install.sh --help 2>&1)"
-want_err "非仓库目录下被拒绝" env HOME="$H" bash "$WORK/nope/install.sh"
+screen "未知参数被拒绝" "未知参数" "$(cd "$WORK/src-dirs" && HOME="$H" bash install.sh --bogus 2>&1)"
+want_ok "--help 可用" env HOME="$H" bash "$WORK/src-dirs/install.sh" --help
+screen "--help 说明自包含" "自包含" "$(cd "$WORK/src-dirs" && HOME="$H" bash install.sh --help 2>&1)"
+want_err "非源码目录下被拒绝" env HOME="$H" bash "$WORK/nope/install.sh"
 
 # ---------------------------------------------------------------- 卸载
 echo
-echo "== --uninstall =="
+echo "== 卸载（默认保留数据）=="
+SRC=$(src_copy "$WORK/src-uninstall")
 H=$(newhome); export HOME="$H"
-(cd "$SRC" && bash install.sh --link >/dev/null 2>&1)
-"$H/.local/bin/skm" config init >/dev/null 2>&1
+(cd "$SRC" && bash install.sh >/dev/null 2>&1)
 has "卸载前：命令在" "$H/.local/bin/skm"
-has "卸载前：数据在" "$H/.skill-manager/config.toml"
+has "卸载前：实现在" "$H/.skill-manager/lib/skm/cli.py"
 out=$(cd "$SRC" && bash install.sh --uninstall 2>&1)
-screen "报告已删除命令" "已删除" "$out"
+screen "报告已删命令" "已删除命令" "$out"
 gone "卸载后：命令已移除" "$H/.local/bin/skm"
-has "卸载后：数据保留" "$H/.skill-manager/config.toml"
-screen "提示数据未动" "数据目录保持不动" "$out"
+gone "卸载后：实现已移除" "$H/.skill-manager/lib"
+gone "卸载后：启动脚本已移除" "$H/.skill-manager/bin"
+has "卸载后：skills 保留" "$H/.skill-manager/skills"
+has "卸载后：config 保留" "$H/.skill-manager/config.toml"
+screen "提示数据保留与 purge 用法" "--purge --yes" "$out"
 out=$(cd "$SRC" && bash install.sh --uninstall 2>&1)
-screen "重复卸载不报错" "没找到已安装的 skm 命令" "$out"
+screen "重复卸载不报错" "没有找到已安装的程序" "$out"
 
-echo "  -- --binary 卸载必须连自包含目录一起清掉（回归用例）--"
+echo "  -- --purge 必须显式二次确认 --"
+SRC=$(src_copy "$WORK/src-purge")
 H=$(newhome); export HOME="$H"
-(cd "$SRC" && bash install.sh --binary >/dev/null 2>&1)
-has "卸载前：自包含目录在" "$H/.local/bin/skm-cli"
-out=$(cd "$SRC" && bash install.sh --uninstall 2>&1)
-screen "卸载报告清理了自包含目录" "已删除自包含安装目录" "$out"
-gone "卸载后：命令已移除" "$H/.local/bin/skm"
-gone "卸载后：自包含目录已清掉" "$H/.local/bin/skm-cli"
+(cd "$SRC" && bash install.sh >/dev/null 2>&1)
+mkdir -p "$H/.skill-manager/skills/keepme"
+printf -- '---\nname: keepme\ndescription: x\n---\n' >"$H/.skill-manager/skills/keepme/SKILL.md"
+out=$(cd "$SRC" && HOME="$H" bash install.sh --uninstall --purge 2>&1)
+screen "未加 --yes 时明确拒绝" "需要再加 --yes" "$out"
+has "被拒绝后数据完好（skills）" "$H/.skill-manager/skills/keepme/SKILL.md"
+has "被拒绝后数据完好（config）" "$H/.skill-manager/config.toml"
+want_err "未加 --yes 时退出码非 0" bash -c "cd '$SRC' && HOME='$H' bash install.sh --uninstall --purge"
+out=$(cd "$SRC" && bash install.sh --uninstall --purge --yes 2>&1)
+screen "加了 --yes 才真删" "已删除整个" "$out"
+gone "purge 后整个 BASE_DIR 消失" "$H/.skill-manager"
+
+echo "  -- 早期版本的 <bin-dir>/skm-cli 残留应被清理 --"
+H=$(newhome); export HOME="$H"
+mkdir -p "$H/.local/bin/skm-cli/src/skm"
+(cd "$SRC" && bash install.sh --uninstall 2>&1) >/dev/null
+gone "旧式安装目录已清掉" "$H/.local/bin/skm-cli"
+
+# ---------------------------------------------------------------- pipx
+echo
+echo "== --pipx =="
+if command -v pipx >/dev/null 2>&1; then
+  SRC=$(src_copy "$WORK/src-pipx")
+  H=$(newhome); export HOME="$H"
+  if env HOME="$H" PIPX_HOME="$H/pipx" PIPX_BIN_DIR="$H/pipxbin" pipx install --force "$SRC" >/dev/null 2>&1; then
+    ok "pipx 安装成功"
+    want_ok "pipx 安装的 skm 可运行" "$H/pipxbin/skm" --version
+    screen "pipx 版本正确" "skm 0.1.0" "$("$H/pipxbin/skm" --version)"
+  else
+    bad "pipx 安装失败"
+  fi
+else
+  echo "  – 跳过：本机没有 pipx"
+fi
 
 echo
 echo "通过 $pass，失败 $fail"

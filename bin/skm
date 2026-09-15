@@ -1,21 +1,35 @@
 #!/usr/bin/env bash
-# skm —— 从源码直接运行的启动脚本（不装任何东西，克隆即可用）
+# skm —— 本地 skill 仓库管理器的启动脚本
 #
-# 本脚本只负责定位实现并交给 python3，不改变数据位置：
-#   实现   <脚本所在目录>/../src/skm/    ← 由脚本自身位置推导，可安全做软链
+# 本脚本只负责定位实现并交给 python3，它自己不含业务逻辑。
+#
+# 实现位置按「脚本所在目录的上一级」推导，依次尝试：
+#   <ROOT>/lib/skm   安装后的位置（install.sh 把实现复制到这里）
+#   <ROOT>/src/skm   源码树里的位置（直接跑克隆目录时）
+#
+# 典型布局：
+#   安装后   ~/.skill-manager/{bin/skm, lib/skm/, skills/, config.toml}
+#   源码树   <clone>/{bin/skm, src/skm/, tests/}
+#
+# 数据位置（与实现分开，安装/卸载都不动它）：
 #   仓库   ${SKM_BASE_DIR:-~/.skill-manager}/skills/
 #   配置   ${SKM_BASE_DIR:-~/.skill-manager}/config.toml
-#
-# 装到 PATH（任选其一）：
-#   ln -s "$PWD/bin/skm" ~/.local/bin/skm      # 符号链接：会解析到脚本真身
-#   bash install.sh                            # 或让安装脚本替你决定
 set -euo pipefail
 
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 ROOT="$(dirname -- "$(dirname -- "${SELF}")")"
 
-if [[ ! -d "${ROOT}/src/skm" ]]; then
-  echo "skm: 找不到实现目录 ${ROOT}/src/skm" >&2
+IMPL=""
+for candidate in "${ROOT}/lib/skm" "${ROOT}/src/skm"; do
+  if [ -d "$candidate" ]; then
+    IMPL="$(dirname -- "$candidate")"
+    break
+  fi
+done
+
+if [ -z "$IMPL" ]; then
+  echo "skm: 找不到实现（已查找 ${ROOT}/lib/skm 与 ${ROOT}/src/skm）" >&2
+  echo "     若安装目录被破坏，重新运行 install.sh 即可修复。" >&2
   exit 1
 fi
 
@@ -32,5 +46,4 @@ if ! "${PYTHON}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 
   exit 1
 fi
 
-exec env PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-  "${PYTHON}" -m skm "$@"
+exec env PYTHONPATH="${IMPL}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON}" -m skm "$@"

@@ -1,148 +1,188 @@
 #!/usr/bin/env bash
 # skm 安装脚本
 #
-#   bash install.sh              从当前克隆安装（默认：软链到 ~/.local/bin）
-#   bash install.sh --copy       复制而不是软链（克隆目录可随意移动）
-#   bash install.sh --pipx       用 pipx 装成隔离的独立包（需 pipx）
-#   bash install.sh --binary     只把 bin/skm 复制到 ~/.local/bin，需自己维护源码
-#   bash install.sh --dir DIR    安装到 DIR（默认 ~/.local/bin）
-#   bash install.sh --repo DIR   仓库根目录（默认 ~/.skill-manager）
-#   bash install.sh --uninstall  卸载（删掉 skm 命令；默认不动数据目录）
+#   bash install.sh                  默认：自包含安装（实现复制进 ~/.skill-manager，源码可删）
+#   bash install.sh --dev            开发模式：命令软链到克隆目录（改代码立即生效，但需保留源码）
+#   bash install.sh --pipx           用 pipx 装成隔离的独立包（需 pipx）
+#   bash install.sh --bin-dir DIR    skm 命令放到哪里（默认 ~/.local/bin）
+#   bash install.sh --base-dir DIR   实现与数据放在哪里（默认 ~/.skill-manager）
+#   bash install.sh --uninstall      卸载程序；skills/ 与 config.toml 保留
+#   bash install.sh --uninstall --purge [--yes]
+#                                    连数据一起删（先列出要删什么；需再加 --yes 才真删）
 #
-# 安装动作只有两件：把 skm 命令放进 PATH，并在首次安装时生成配置文件。
-# 数据目录（仓库 / 配置）永远不动，除非你显式传 --repo。
+# 安装后的布局（--base-dir 的默认值即 ~/.skill-manager）：
+#
+#   ~/.local/bin/skm          → 软链，指向 ~/.skill-manager/bin/skm
+#   ~/.skill-manager/
+#     bin/skm                 启动脚本（副本）
+#     lib/skm/                实现（副本）—— 删掉源码目录不影响使用
+#     skills/                 你的 skill 仓库（安装/卸载都不动它）
+#     config.toml             配置（安装/卸载都不动它）
+#
+# 升级：在源码目录 git pull 后重新运行本脚本即可（会覆盖 bin/ 与 lib/）。
 set -euo pipefail
 
-MODE="link"
+MODE="install"
 BIN_DIR="${HOME}/.local/bin"
-REPO_DIR="${HOME}/.skill-manager"
-MOVE_DATA=0
+BASE_DIR="${HOME}/.skill-manager"
 UNINSTALL=0
+PURGE=0
+CONFIRM=0
 
-die() { echo "install.sh: $*" >&2; exit 1; }
+die()  { echo "install.sh: $*" >&2; exit 1; }
 info() { printf '  %s\n' "$*"; }
+note() { printf '  %s\n' "$*" >&2; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --link) MODE="link" ;;
-    --copy) MODE="copy" ;;
+    --dev) MODE="dev" ;;
     --pipx) MODE="pipx" ;;
-    --binary) MODE="binary" ;;
-    --dir) shift; BIN_DIR="${1:-}" ;;
-    --repo) shift; REPO_DIR="${1:-}"; MOVE_DATA=1 ;;
+    --bin-dir) shift; BIN_DIR="${1:-}" ;;
+    --base-dir) shift; BASE_DIR="${1:-}" ;;
     --uninstall) UNINSTALL=1 ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --purge) PURGE=1 ;;
+    --yes|-y) CONFIRM=1 ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "未知参数：$1（用 --help 看用法）" ;;
   esac
   shift
 done
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TARGET="${BIN_DIR}/skm"
 
 # ---------------------------------------------------------------- 卸载
 if [ "$UNINSTALL" -eq 1 ]; then
   echo "卸载 skm"
   removed=0
-  for candidate in "${BIN_DIR}/skm" "${HOME}/.local/bin/skm"; do
+
+  for candidate in "$TARGET" "${HOME}/.local/bin/skm"; do
     if [ -e "$candidate" ] || [ -L "$candidate" ]; then
-      rm -f "$candidate" && info "已删除 $candidate" && removed=1
+      rm -f "$candidate" && info "已删除命令 $candidate" && removed=1
     fi
   done
-  # --binary 会额外把实现复制到 <BIN_DIR>/skm-cli；不清掉就会留下孤儿目录，
-  # 而它的名字（skm-cli）会让用户以为是别的程序的安装结果。
-  payload="${BIN_DIR}/skm-cli"
-  if [ -d "$payload" ]; then
-    rm -rf "$payload" && info "已删除自包含安装目录 $payload" && removed=1
+  # 兼容早期版本把自包含目录放在 <bin-dir>/skm-cli 的布局
+  if [ -d "${BIN_DIR}/skm-cli" ]; then
+    rm -rf "${BIN_DIR}/skm-cli" && info "已删除旧式安装目录 ${BIN_DIR}/skm-cli" && removed=1
   fi
-  [ "$removed" -eq 1 ] || info "没找到已安装的 skm 命令"
-  info "数据目录保持不动：${REPO_DIR}（要删请自行确认后 rm -rf）"
+
+  for payload in "${BASE_DIR}/bin" "${BASE_DIR}/lib"; do
+    if [ -e "$payload" ]; then
+      rm -rf "$payload" && info "已删除 $payload" && removed=1
+    fi
+  done
+
+  [ "$removed" -eq 1 ] || info "没有找到已安装的程序"
+
+  if [ "$PURGE" -eq 1 ]; then
+    echo
+    # 数据是用户的资产：先如实列出要删什么，再要求显式确认，绝不"顺手"删掉
+    skill_count=0
+    [ -d "${BASE_DIR}/skills" ] && skill_count=$(find "${BASE_DIR}/skills" -name SKILL.md 2>/dev/null | wc -l)
+    echo "  --purge 会删除以下数据（不可恢复）："
+    echo "      仓库：${BASE_DIR}/skills     （${skill_count} 个 skill）"
+    echo "      配置：${BASE_DIR}/config.toml"
+    if [ "$CONFIRM" -eq 1 ]; then
+      rm -rf "${BASE_DIR}"
+      info "已删除整个 ${BASE_DIR}"
+    else
+      echo
+      note "未删除：需要再加 --yes 明确确认（这会永久删除 ${skill_count} 个 skill）。"
+      exit 1
+    fi
+  else
+    echo
+    info "数据保留：${BASE_DIR}/skills 与 config.toml（要连数据一起删：--uninstall --purge --yes）"
+  fi
   exit 0
 fi
 
 # ---------------------------------------------------------------- pipx
 if [ "$MODE" = "pipx" ]; then
   command -v pipx >/dev/null 2>&1 \
-    || die "没找到 pipx。先装 pipx，或改用默认的 --link 方式。"
+    || die "没找到 pipx。先装 pipx，或改用默认的自包含安装方式。"
   echo "用 pipx 从 $ROOT 安装"
   pipx install --force "$ROOT"
   info "命令：$(command -v skm || echo 'skm（pipx 的 bin 目录）')"
   echo
   echo "下一步：初始化配置"
   echo "  skm config init                        # 使用默认仓库 ~/.skill-manager"
-  echo "  skm config init --base-dir ${REPO_DIR}  # 或指定仓库根目录"
+  echo "  skm config init --base-dir ${BASE_DIR}  # 或指定仓库根目录"
   exit 0
 fi
 
-[ -d "${ROOT}/src/skm" ] || die "在 ${ROOT} 下找不到 src/skm，请从仓库根目录运行本脚本。"
+[ -d "${ROOT}/src/skm" ] || die "在 ${ROOT} 下找不到 src/skm，请从源码目录运行本脚本。"
+[ -f "${ROOT}/bin/skm" ] || die "在 ${ROOT} 下找不到 bin/skm，请从源码目录运行本脚本。"
 command -v python3 >/dev/null 2>&1 || die "没找到 python3（需要 3.11+）。"
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
   || die "需要 Python 3.11+（当前 $(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')）。"
 
 mkdir -p "$BIN_DIR"
-TARGET="${BIN_DIR}/skm"
 
-echo "安装 skm"
-case "$MODE" in
-  link)
-    # 软链：bin/skm 会 readlink -f 解析到脚本真身，因此升级只需 git pull
-    ln -sfn "${ROOT}/bin/skm" "$TARGET"
-    info "已软链 ${TARGET} -> ${ROOT}/bin/skm"
-    ;;
-  copy)
-    # 生成一个指向克隆目录的短包装脚本。用它的理由：某些环境不欢迎 PATH 里的软链。
-    # 包装脚本必须写死克隆路径 —— 否则它会像软链一样按自身位置推导 ROOT，却推导错。
-    cat >"$TARGET" <<EOF
-#!/usr/bin/env bash
-# 由 skm 的 install.sh --copy 生成；实现与数据位置都在原克隆目录里。
-exec "${ROOT}/bin/skm" "\$@"
-EOF
-    chmod +x "$TARGET"
-    info "已写入包装脚本 ${TARGET}（指向 ${ROOT}/bin/skm）"
-    info "克隆目录移动后需重新运行安装"
-    ;;
-  binary)
-    # 自包含：把实现一起复制进去，之后克隆目录可以删掉
-    # 布局必须与 bin/skm 的推导一致（它取「自己所在目录的上一级」当 ROOT，
-    # 再去找 ROOT/src/skm），所以这里是 <install_dir>/bin/skm + <install_dir>/src/skm
-    install_dir="${BIN_DIR}/skm-cli"
-    rm -rf "$install_dir"
-    mkdir -p "$install_dir/src" "$install_dir/bin"
-    cp -r "${ROOT}/src/skm" "$install_dir/src/"
-    cp "${ROOT}/bin/skm" "$install_dir/bin/skm"
-    chmod +x "$install_dir/bin/skm"
-    ln -sfn "$install_dir/bin/skm" "$TARGET"
-    info "已自包含安装到 ${install_dir}，命令 ${TARGET}"
-    ;;
-esac
+# ---------------------------------------------------------------- --dev
+if [ "$MODE" = "dev" ]; then
+  echo "安装 skm（开发模式）"
+  ln -sfn "${ROOT}/bin/skm" "$TARGET"
+  info "已软链 ${TARGET} -> ${ROOT}/bin/skm"
+  info "实现直接取自源码目录 ${ROOT}，改动立即生效"
+  note "注意：此模式依赖源码目录存在，删掉源码后 skm 将不可用。"
+  note "      日常使用请改用默认安装：bash install.sh"
+  if [ ! -f "${BASE_DIR}/config.toml" ]; then
+    "${TARGET}" config init --base-dir "$BASE_DIR" >/dev/null 2>&1 || true
+    [ -f "${BASE_DIR}/config.toml" ] && info "已生成配置：${BASE_DIR}/config.toml"
+  else
+    info "配置已存在，未改动：${BASE_DIR}/config.toml"
+  fi
+  echo
+  echo "验证：skm --version && skm agents"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- 默认：自包含安装
+echo "安装 skm（自包含）"
+mkdir -p "${BASE_DIR}/lib" "${BASE_DIR}/bin" "${BASE_DIR}/skills"
+
+# 实现与启动脚本都复制一份到 BASE_DIR：此后源码目录即可删除。
+# 布局必须与 bin/skm 的推导一致：它取「自身所在目录的上一级」当 ROOT，
+# 再依次找 ROOT/lib/skm（安装后）与 ROOT/src/skm（源码树）。
+rm -rf "${BASE_DIR}/lib/skm"
+cp -r "${ROOT}/src/skm" "${BASE_DIR}/lib/"
+find "${BASE_DIR}/lib/skm" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+cp "${ROOT}/bin/skm" "${BASE_DIR}/bin/skm"
+chmod +x "${BASE_DIR}/bin/skm"
+info "实现已安装到 ${BASE_DIR}/lib/skm"
+
+ln -sfn "${BASE_DIR}/bin/skm" "$TARGET"
+info "命令 ${TARGET} -> ${BASE_DIR}/bin/skm"
+
+# ---------------------------------------------------------------- 配置
+if [ -f "${BASE_DIR}/config.toml" ]; then
+  info "配置已存在，未改动：${BASE_DIR}/config.toml"
+else
+  "$TARGET" config init --base-dir "$BASE_DIR" >/dev/null
+  info "已生成配置：${BASE_DIR}/config.toml"
+fi
 
 # ---------------------------------------------------------------- PATH 检查
 case ":${PATH}:" in
   *":${BIN_DIR}:"*) ;;
   *) echo
-     echo "提示：${BIN_DIR} 不在 PATH 里，把下面这行加到 ~/.bashrc："
-     echo "  export PATH=\"${BIN_DIR}:\$PATH\"" ;;
+     note "提示：${BIN_DIR} 不在 PATH 里，把下面这行加到 ~/.bashrc："
+     note "  export PATH=\"${BIN_DIR}:\$PATH\"" ;;
 esac
 
-# ---------------------------------------------------------------- 首次配置
 echo
-CONFIG_FILE="${REPO_DIR}/config.toml"
-if [ -f "$CONFIG_FILE" ]; then
-  info "配置已存在，未改动：${CONFIG_FILE}"
-elif [ "$MOVE_DATA" -eq 1 ]; then
-  "$TARGET" config init --base-dir "$REPO_DIR" >/dev/null
-  info "已生成配置：${CONFIG_FILE}"
-else
-  info "未生成配置文件（用内置默认：仓库 ~/.skill-manager，目标 ~/.agents/skills）"
-  info "想把它固化成文件：skm config init"
-fi
-
+echo "安装完成。源码目录现在可以删掉，不影响使用。"
 echo
-echo "完成。验证一下："
+echo "验证："
 echo "  skm --version && skm agents && skm list"
 echo
-echo "首次使用建议流程："
-echo "  1) 把 skill 目录放进仓库：~/.skill-manager/skills/<名字>/SKILL.md"
-echo "     （分类就是中间加一层目录：~/.skill-manager/skills/<分类>/<名字>/SKILL.md）"
+echo "首次使用："
+echo "  1) 把 skill 放进仓库：${BASE_DIR}/skills/<名字>/SKILL.md"
+echo "     （分类就是中间加一层目录：${BASE_DIR}/skills/<分类>/<名字>/SKILL.md）"
 echo "  2) skm list                 看看认到了没有"
-echo "  3) skm enable <名字>        启用（会在 ~/.agents/skills 建软链）"
+echo "  3) skm enable <名字>        启用（会在 agent 目录里建软链）"
 echo "  4) 重启 agent 生效"
+echo
+echo "升级：在源码目录 git pull 后重新运行 bash install.sh"
+echo "卸载：bash install.sh --uninstall"
