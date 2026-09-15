@@ -117,8 +117,11 @@ def _select(snapshot: scan.Snapshot, queries: list[str], args) -> list:
     else:
         skills = list(snapshot.skills)
 
-    category = getattr(args, "category", None)
-    if category:
+    # ``--category ''`` 与 ``--uncategorized`` 都表示「仓库一级目录下的那些」。
+    # 判断必须用 ``is not None`` —— 空字符串是正当取值，用 ``if category:``
+    # 会把它当成"没给这个参数"，于是筛选被静默忽略、操作落到全部 skill 上。
+    category = _category_filter(args)
+    if category is not None:
         skills = [s for s in skills if (s.category or "") == category]
 
     if getattr(args, "enabled", False):
@@ -126,6 +129,13 @@ def _select(snapshot: scan.Snapshot, queries: list[str], args) -> list:
     if getattr(args, "disabled", False):
         skills = [s for s in skills if not snapshot.enabled(s)]
     return sorted(skills, key=lambda s: ((s.category or ""), s.dirname))
+
+
+def _category_filter(args) -> str | None:
+    """取出分类筛选：``None`` = 不筛；``""`` = 只留未分类。"""
+    if getattr(args, "uncategorized", False):
+        return ""
+    return getattr(args, "category", None)
 
 
 def _resolve_targets(snapshot: scan.Snapshot, args) -> list:
@@ -690,7 +700,7 @@ def cmd_import(args) -> int:
         print("例：skm import ~/Downloads/skills", file=sys.stderr)
         return EXIT_USAGE
 
-    plan = importer.plan(cfg, roots, category=args.category, copy=args.copy)
+    plan = importer.plan(cfg, roots, category=_category_filter(args), copy=args.copy)
     for warning in plan.warnings:
         print(style.yellow(f"⚠ {_shrink_paths(warning)}"), file=sys.stderr)
     for path, reason in plan.ignored:
@@ -938,6 +948,7 @@ _EXAMPLES = """\
   skm list --enabled                  只看已启用的
   skm list --disabled 'qt-*'          只看「qt- 开头」里未启用的
   skm list --category security-skills 只看某个分类
+  skm list --uncategorized            只看未分类的（仓库一级目录下的那些）
   skm status pdf qt-qml               批量查看详细状态
   skm status --json | jq .skills      机器可读输出
 
@@ -954,6 +965,8 @@ _EXAMPLES = """\
   skm enable --all                    启用仓库内全部
   skm enable --all --disabled         只把「还没启用的」启用（等价于全部启用）
   skm enable --category qt-skills     按分类批量启用
+  skm enable --uncategorized          只启用未分类的（一级目录下的那些）
+  skm enable -u --disabled            只把未分类里还没启用的启用
   skm disable --all                   全部停用（真身不动）
   skm disable pdf --agent codex       只对某个 agent 停用
   skm enable pdf -n                   预演，不实际改
@@ -1035,7 +1048,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     common_filters = argparse.ArgumentParser(add_help=False)
     common_filters.add_argument("--category", "-c", metavar="分类",
-                                help="只看某个分类（未分类用 ''）")
+                                help="只看某个分类（未分类用 --uncategorized）")
+    common_filters.add_argument("--uncategorized", "-u", action="store_true",
+                                help="只看仓库一级目录下的 skill（未分类的）")
     common_filters.add_argument("--enabled", action="store_true", help="只看已启用")
     common_filters.add_argument("--disabled", action="store_true", help="只看未启用")
     common_filters.add_argument("--json", action="store_true", help="输出 JSON")
@@ -1048,7 +1063,7 @@ def build_parser() -> argparse.ArgumentParser:
                "    skm list --enabled\n"
                "    skm list --disabled 'qt-*'\n"
                "    skm list --category security-skills --json\n"
-               "    skm list --category security-skills --json",
+               "    skm list --uncategorized            只看未分类的",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     listing.add_argument("query", nargs="*", metavar="标识",
@@ -1063,7 +1078,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="例：skm status pdf\n"
                "    skm status pdf qt-qml docx\n"
                "    skm status --category qt-skills\n"
-
+               "    skm status --uncategorized                只看未分类的\n"
                "    skm status pdf --json",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1081,6 +1096,8 @@ def build_parser() -> argparse.ArgumentParser:
                              help="允许替换已存在的断链（仍不会覆盖真目录/别人的链接）")
     write_flags.add_argument("--dry-run", "-n", action="store_true", help="只显示不改动")
     write_flags.add_argument("--category", "-c", metavar="分类", help="按分类批量操作")
+    write_flags.add_argument("--uncategorized", "-u", action="store_true",
+                             help="只操作仓库一级目录下的 skill（未分类的）")
     write_flags.add_argument("--enabled", action="store_true", help="只处理当前已启用的")
     write_flags.add_argument("--disabled", action="store_true",
                              help="只处理当前未启用的（与 --all 合用即「全部启用」）")
@@ -1093,7 +1110,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="例：skm enable pdf\n"
                "    skm enable pdf docx qt-qml\n"
                "    skm enable --category qt-skills\n"
-
+               "    skm enable --uncategorized        只启用未分类的\n"
                "    skm enable 'dbus-*'        （glob）\n"
                "    skm enable --all\n"
                "    skm enable --all --disabled  只启用还没启用的\n"
@@ -1114,7 +1131,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="例：skm disable pdf\n"
                "    skm disable pdf qt-qml\n"
                "    skm disable --category security-skills\n"
-
+               "    skm disable --uncategorized               只停用未分类的\n"
                "    skm disable --all\n"
                "    skm disable pdf --agent codex   只停用某个 agent 的链接\n"
                "    skm disable qt-qml -n           预演，不实际改\n"
@@ -1181,6 +1198,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="复制而不是移动（源目录保留，不回填链接）")
     imp.add_argument("--category", "-c", metavar="分类",
                      help="收进仓库的哪个分类（缺省沿用源目录的分类结构）")
+    imp.add_argument("--uncategorized", "-u", action="store_true",
+                     help="直接收进仓库一级目录（不沿用源的分类结构）")
     imp.add_argument("--dry-run", "-n", action="store_true", help="只出计划，不改动")
     imp.add_argument("--json", action="store_true", help="输出 JSON")
     imp.set_defaults(func=cmd_import, command="import")
@@ -1209,8 +1228,10 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "command", None) in ("enable", "disable"):
         if args.all:
             args.query = []
-        # 用子命令自己的 parser 报错：这样用法行是 `skm enable ...` 而不是顶层用法
-        if not (args.query or args.all or args.category):
+        # 用子命令自己的 parser 报错：这样用法行是 `skm enable ...` 而不是顶层用法。
+        # 注意判断用 ``is not None``：`--category ''`（未分类）是有效筛选，
+        # 用真值判断会把它当没给、直接报"缺少参数"。
+        if not (args.query or args.all or _category_filter(args) is not None):
             args.subparser.error("请给出 skill 标识，或用 --all / --category 表示批量")
     try:
         return int(args.func(args))

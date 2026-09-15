@@ -184,6 +184,7 @@ skm import --yes                 # 执行
 
 ```bash
 skm import ~/s --category qt --yes    # 全部收进指定分类
+skm import ~/s --uncategorized --yes  # 直接收进一级目录（不沿用源的分类结构）
 skm import --yes --dry-run            # --dry-run 压过 --yes，仍然只出计划
 skm import --json | jq '.items[]'     # 机器可读（含每条的 verdict / result）
 ```
@@ -207,6 +208,14 @@ agent 目录本身是软链（把 `~/.agents/skills` 链到 dotfiles 里）也�
 
 标识可以是**目录名**、**分类/目录名**（`qt-skills/qt-qml`）或 **glob**（`qt-*`）。
 
+范围筛选（`list` / `status` / `enable` / `disable` 通用）：
+
+| 筛选 | 含义 |
+|---|---|
+| `--category <名字>` / `-c` | 只看该分类 |
+| `--uncategorized` / `-u` | 只看未分类的（仓库一级目录下的那些） |
+| `--enabled` / `--disabled` | 只看已启用 / 未启用的 |
+
 ### 查询
 
 ```bash
@@ -214,9 +223,25 @@ skm list                            # 树形列出全部
 skm list --enabled                  # 只看已启用的
 skm list --disabled 'qt-*'          # 只看「qt- 开头」里未启用的
 skm list --category security-skills # 只看某个分类
+skm list --uncategorized            # 只看未分类的（仓库一级目录下的那些）
 skm status pdf qt-qml               # 批量查看详细状态
 skm status --json | jq '.skills[] | select(.enabled)'   # 机器可读
 ```
+
+### 只操作未分类的 / 只操作某个分类
+
+仓库一级目录下的 skill 是**未分类**的，`<分类>/<名字>` 下的属于该分类。
+`--uncategorized`（`-u`）与 `--category <名字>` 把批量操作限制在其中一边：
+
+```bash
+skm enable --uncategorized        # 只启用未分类的，分类里的一律不动
+skm enable -u --disabled          # 只把未分类里还没启用的启用
+skm disable -u                    # 只停用未分类的
+skm list -u                       # 只看未分类的
+```
+
+> `--category ''`（空字符串）与 `--uncategorized` 等价，但 shell 里引号容易被吃掉、
+> 手敲也麻烦 —— 建议用 `--uncategorized`。
 
 `list` 输出形如（`✓` 已启用、`~` 部分启用、`·` 未启用）：
 
@@ -235,6 +260,7 @@ skm status --json | jq '.skills[] | select(.enabled)'   # 机器可读
 skm enable pdf                      # 单个
 skm enable pdf docx qt-qml          # 多个
 skm enable --category qt-skills     # 整个分类
+skm enable --uncategorized          # 只启用未分类的（分类里的不动）
 skm enable 'dbus-*'                 # glob
 skm enable --all                    # 仓库内全部
 skm enable --all --disabled         # 只把还没启用的启用（= 全部启用）

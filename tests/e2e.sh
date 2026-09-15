@@ -319,6 +319,62 @@ echo "== 筛选滤空 vs 仓库真空（提示不同）=="
 check "滤空时提示筛选" "没有符合筛选条件" "$("$SKM" status --enabled --category nope)"
 check "滤空时 list 提示筛选" "没有可显示的 skill" "$("$SKM" list --category nope)"
 
+echo "== 未分类筛选：--uncategorized / --category ''（只碰一级目录）=="
+# 回归：以前 ``--category ''`` 被当成"没给参数"，筛选静默失效 —— 批量操作会
+# 落到**全部** skill 上（比漏启用危险得多）。这里两个写法都必须只命中未分类的。
+T6=$(mktemp -d /tmp/skm-e2e-uncat-XXXXXX)
+export SKM_BASE_DIR="$T6/repo"; export HOME="$T6/home"
+mkdir -p "$HOME/.agents/skills" "$SKM_BASE_DIR/skills"
+printf -- '---\nname: plain-one\ndescription: 未分类\n---\n' >"$SKM_BASE_DIR/skills/plain-one/SKILL.md" 2>/dev/null \
+  || { mkdir -p "$SKM_BASE_DIR/skills/plain-one"; printf -- '---\nname: plain-one\ndescription: 未分类\n---\n' >"$SKM_BASE_DIR/skills/plain-one/SKILL.md"; }
+mkdir -p "$SKM_BASE_DIR/skills/plain-two"; printf -- '---\nname: plain-two\ndescription: 未分类\n---\n' >"$SKM_BASE_DIR/skills/plain-two/SKILL.md"
+mkdir -p "$SKM_BASE_DIR/skills/cat-z/in-cat"; printf -- '---\nname: in-cat\ndescription: 分类内\n---\n' >"$SKM_BASE_DIR/skills/cat-z/in-cat/SKILL.md"
+
+out=$("$SKM" list --uncategorized)
+check "-u 列出未分类的" "plain-one" "$out"
+check "-u 也列出第二个未分类的" "plain-two" "$out"
+refute "-u 不含分类内的" "in-cat" "$out"
+refute "-u 不显示分类枝条" "cat-z/" "$out"
+
+out=$("$SKM" list --category '')
+check "--category '' 等价于 -u" "plain-one" "$out"
+refute "--category '' 不含分类内的" "in-cat" "$out"
+
+# 批量操作的作用域：这是本用例的核心
+out=$("$SKM" enable --uncategorized -n)
+check "-u 启用的作用域只含未分类" "plain-one" "$out"
+refute "-u 启用不含分类内的" "in-cat" "$out"
+out=$("$SKM" enable --category '' -n)
+check "--category '' 同样只含未分类" "plain-one" "$out"
+refute "--category '' 不含分类内的" "in-cat" "$out"
+
+# 真执行：分类内的绝不能被启用
+"$SKM" enable --uncategorized >/dev/null 2>&1
+assert_true "未分类已建链" test -L "$HOME/.agents/skills/plain-one"
+assert_true "未分类第二个也已建链" test -L "$HOME/.agents/skills/plain-two"
+assert_true "分类内的没被碰" test ! -e "$HOME/.agents/skills/in-cat"
+
+# 真实用法：只启用未分类里还没启用的
+"$SKM" disable plain-two >/dev/null 2>&1
+"$SKM" enable -u --disabled >/dev/null 2>&1
+assert_true "-u --disabled 补齐未分类的" test -L "$HOME/.agents/skills/plain-two"
+assert_true "-u --disabled 仍不碰分类内的" test ! -e "$HOME/.agents/skills/in-cat"
+
+# --all 与 -u 同用：--all 只表示"不必给标识"，-u 继续收窄范围
+out=$("$SKM" enable --all --uncategorized -n)
+check "--all -u 仍只选未分类" "plain-one" "$out"
+refute "--all -u 不含分类内的" "in-cat" "$out"
+
+# 与 --enabled/--disabled 组合、以及 status 的筛选
+out=$("$SKM" status --uncategorized)
+check "status -u 只列未分类" "plain-one" "$out"
+refute "status -u 不含分类内的" "in-cat" "$out"
+
+# import 也能指定"直接收进一级目录"
+mkdir -p "$T6/src/loose/sub-x"; printf -- '---\nname: sub-x\ndescription: x\n---\n' >"$T6/src/loose/sub-x/SKILL.md"
+"$SKM" import "$T6/src/loose" --uncategorized --yes >/dev/null 2>&1
+assert_true "import -u 直接落在仓库一级目录" test -f "$SKM_BASE_DIR/skills/sub-x/SKILL.md"
+
 # 恢复主场景的环境，后续用例继续用
 export SKM_BASE_DIR="$T/repo"; export HOME="$T/home"
 
