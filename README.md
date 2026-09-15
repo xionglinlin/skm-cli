@@ -250,12 +250,6 @@ src/skm/
   cli.py       命令行
 ```
 
-## 与 GUI 的关系
-
-本仓库只含 CLI。此前另有一个 Qt/QML 图形界面原型（含收编未托管 skill、
-跨设备迁移等规划），其模型与本 CLI 不同（多 agent 矩阵、XDG 配置、
-托管/未托管维度），故未并入本仓库，以免两套模型互相污染。
-
 ## 许可
 
 GPL-3.0-or-later，见 [LICENSE](LICENSE)。
