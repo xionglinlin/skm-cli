@@ -236,7 +236,8 @@ $ skm agents
 ## 开发
 
 ```bash
-bash tests/e2e.sh      # 56 项端到端验证，全部在临时 HOME 里跑，不碰真实数据
+bash tests/e2e.sh        # 56 项：CLI 行为端到端（临时 HOME，不碰真实数据）
+bash tests/install.sh    # 45 项：安装/卸载/各安装方式（离线，临时 HOME）
 ```
 
 源码结构：
