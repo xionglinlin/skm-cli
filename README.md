@@ -8,7 +8,9 @@
 「停用」= 删掉那条链接
 ```
 
-真身（含分类目录）始终留在自己的仓库里，不会被移动或复制。
+真身（含分类目录）始终留在自己的仓库里：日常的**启用/停用只动链接**，从不移动或复制
+真身。唯一会搬动真身的是 `skm import` —— 它的职责正是把仓库外的真身收进来，
+且原位置会自动补回链接。
 
 ```text
   仓库（真身）                     agent 目录（链接）
@@ -46,6 +48,9 @@ skm 的取舍是：**真身只有一份，放在你自己的仓库里；对 agen
 显式 `--force` 才替换。停用只删除「解析后正是本 skill 真身」的链接。
 
 **目标目录不存在就跳过**，不替 agent 创建目录。
+
+**会搬动真身的只有 `skm import`。** 它是"把已有 skill 收进仓库"的入口，
+因此默认只出计划、`--yes` 才执行；搬走的位置会补回链接，agent 侧零感知。
 
 ## 安装
 
@@ -111,15 +116,18 @@ git clone https://github.com/xionglinlin/skm-cli.git
 
 ## 快速开始
 
-安装脚本已经建好仓库并生成配置，直接放 skill 即可：
-
 ```bash
-# 1. 把 skill 放进仓库
+# 1. 把 skill 放进仓库 —— 两种办法任选
+
+# (a) 手动拷贝
 mkdir -p ~/.skill-manager/skills/pdf
 cp -r /path/to/pdf-skill/* ~/.skill-manager/skills/pdf/     # 需含 SKILL.md
-
 # 分类就是中间加一层目录
 mkdir -p ~/.skill-manager/skills/qt-skills/qt-qml
+
+# (b) 让 skm 扫描已有 skill 并收进仓库（推荐：新装机器上 skill 通常已经散在各处）
+skm import                    # 先出计划，不改动任何文件
+skm import --yes              # 确认后执行
 
 # 2. 看看仓库里有什么、现在什么状态
 skm list
@@ -133,12 +141,64 @@ skm enable --category qt-skills
 
 > 用的是「方式三：不安装，直接跑」时，先执行一次 `skm config init` 生成配置。
 
+### skm import：把已有 skill 收进仓库
+
+新用户的第一站通常是"仓库空着，但机器上已经有 skill 了"。`skm import` 就是为这一步准备的：
+
+```bash
+skm import                       # 扫配置里的全部 agent 目录，只出计划
+skm import ~/Downloads/skills    # 扫指定目录（可给多个）
+skm import --yes                 # 执行
+```
+
+它对每个找到的 skill 真身：
+
+- **搬进仓库**（默认移动，不复制 —— 真身只有一份）；
+- 若真身原本就在 agent 目录里，**在原位置补一条链接** —— agent 读到的内容分毫不变；
+- 源是按 `<分类>/<名字>` 摆放的，分类会一并带进仓库；
+- 搬空后留下的空分类目录会被收掉（只删空目录，且不越过 agent 根目录）。
+
+链接补在 `<agent>/<目录名>` 这一**规范位置**（与 `enable` 建的位置一致），
+而不是源所在的层级 —— 分类只是真身的摆放方式，链接名始终扁平。所以源在
+`~/.agents/skills/qt-skills/qt-qml` 时，收编后是 `~/.agents/skills/qt-qml` 一条链接。
+
+**默认只出计划**，`--yes` 才动手：这一步会移动真身，先看清"哪个目录搬到哪"再确认。
+
+安全边界与其它命令一致，绝不覆盖：
+
+| 情况 | 处理 |
+|---|---|
+| 仓库里已有同名条目 | **拒绝**，源保持不动 |
+| 同一次扫描出现两处同名真身 | 只收第一处，第二处拒绝 |
+| agent 侧的链接位被真目录/别人的链接占住 | **拒绝**（搬走后 agent 会读不到它） |
+| 找到的东西是符号链接 | 跳过 —— 链接不是真身，归 `enable` / `disable` 管 |
+| 源的分类目录里还有别的东西 | 不动它，只搬走 skill 自己 |
+
+指了路径但该路径**不在配置的任何 agent 目录下**时，会明确告警"收编后不会回填链接"
+（谁在读它无从得知）。若那其实是某个还没配进来的 agent 目录（如 `~/.claude/skills`），
+先把它加进 `[[agents]]`，或用 `--copy` 保留原目录。
+
+`--copy` 只给"源是 git 工作区、不想动它"这种场景用：源目录保留，因此**不回填链接**，
+也会**拒绝**源位于 agent 加载目录里的情况（那会在 agent 目录留下第二份真身，
+之后 `enable` 会被"位置被占住"拒绝）。
+
+```bash
+skm import ~/s --category qt --yes    # 全部收进指定分类
+skm import --yes --dry-run            # --dry-run 压过 --yes，仍然只出计划
+skm import --json | jq '.items[]'     # 机器可读（含每条的 verdict / result）
+```
+
+agent 目录本身是软链（把 `~/.agents/skills` 链到 dotfiles 里）也能正常收编 ——
+扫描按真身进行，补链接仍落在配置写的那个路径上。
+
+
 ## 命令一览
 
 | 命令 | 作用 |
 |---|---|
 | `skm list` | 树形列出全部 skill 及启用状态 |
 | `skm status` | 查看详细状态（每个目标目录里那块位置到底是什么） |
+| `skm import` / `scan` | 扫描已有 skill 并收进仓库（原地补链接） |
 | `skm enable` / `on` | 启用（建链接） |
 | `skm disable` / `off` | 停用（删链接，真身保留） |
 | `skm agents` | 列出配置里的 agent 及其加载目录 |
@@ -255,7 +315,7 @@ $ skm agents
 ## 开发
 
 ```bash
-bash tests/e2e.sh        # 56 项：CLI 行为端到端（临时 HOME，不碰真实数据）
+bash tests/e2e.sh        # 92 项：CLI 行为端到端（临时 HOME，不碰真实数据）
 bash tests/install.sh    # 60 项：安装/卸载/各安装方式（离线，临时 HOME）
 ```
 
@@ -265,6 +325,7 @@ bash tests/install.sh    # 60 项：安装/卸载/各安装方式（离线，临
 src/skm/
   model.py     skill 模型、SKILL.md frontmatter 解析、链接状态判定
   scan.py      只读扫描：仓库 + 各 agent 目录 → 一份事实快照
+  importer.py  收编：把已有 skill 真身搬进仓库，并在原位置补链接
   actions.py   写操作：建链 / 删链（含全部安全判定）
   config.py    配置读写
   cli.py       命令行

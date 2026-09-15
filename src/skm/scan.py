@@ -80,14 +80,16 @@ def _scan_store(store_dir: Path, warnings: list[str]) -> list[Skill]:
         if entry.name.startswith("."):
             continue
         if entry.is_dir() and (entry / SKILL_FILE).is_file():
-            skills.append(_make_skill(entry, None, seen_real, warnings))
+            skills.append(_register(make_skill(entry), seen_real, warnings))
         elif entry.is_dir():
             # 二层：分类目录。is_dir() 会跟随软链，所以"把分类指向别处"也能扫到。
             for sub in sorted(entry.iterdir(), key=lambda p: p.name):
                 if sub.name.startswith("."):
                     continue
                 if sub.is_dir() and (sub / SKILL_FILE).is_file():
-                    skills.append(_make_skill(sub, entry.name, seen_real, warnings))
+                    skills.append(
+                        _register(make_skill(sub, entry.name), seen_real, warnings)
+                    )
                 elif sub.is_dir():
                     warnings.append(
                         f"{entry.name}/{sub.name} 里没有 {SKILL_FILE}，已跳过"
@@ -97,19 +99,18 @@ def _scan_store(store_dir: Path, warnings: list[str]) -> list[Skill]:
     return skills
 
 
-def _make_skill(
-    dir_path: Path,
-    category: str | None,
-    seen_real: dict[str, Skill],
-    warnings: list[str],
-) -> Skill:
-    real_path = os.path.realpath(dir_path)
+def make_skill(dir_path: Path, category: str | None = None) -> Skill:
+    """把一个目录读成 ``Skill``：读 frontmatter、生成告警。不判断仓库内重复。
+
+    公开是因为「收进仓库」（``skm import``）也要在搬完之后读同一套字段 ——
+    真身的模型只能有一个来源。
+    """
     frontmatter, read_warnings = read_skill_file(dir_path / SKILL_FILE)
     name = frontmatter.get("name", "").strip() or dir_path.name
     skill = Skill(
         dirname=dir_path.name,
         dir_path=dir_path,
-        real_path=real_path,
+        real_path=os.path.realpath(dir_path),
         name=name,
         description=frontmatter.get("description", "").strip(),
         frontmatter=frontmatter,
@@ -120,14 +121,17 @@ def _make_skill(
         skill.warnings.append(f"frontmatter name（{name}）与目录名不一致，链接用目录名")
     if not skill.description:
         skill.warnings.append("缺 description —— OMP 的 native 源要求它有值")
+    return skill
 
-    previous = seen_real.get(real_path)
+
+def _register(skill: Skill, seen_real: dict[str, Skill], warnings: list[str]) -> Skill:
+    """同一真身在仓库里出现两次时，在两条记录上都标出来（另一处在哪）。"""
+    previous = seen_real.get(skill.real_path)
     if previous is not None:
-        # 同一真身出现在仓库里两次：只保留一条记录，但要说清另一处在哪。
-        previous.warnings.append(f"与 {skill.id} 是同一真身（{real_path}），已合并")
+        previous.warnings.append(f"与 {skill.id} 是同一真身（{skill.real_path}），已合并")
         warnings.append(f"{skill.id} 与 {previous.id} 指向同一目录，按一个 skill 处理")
     else:
-        seen_real[real_path] = skill
+        seen_real[skill.real_path] = skill
     return skill
 
 

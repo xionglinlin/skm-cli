@@ -3,7 +3,8 @@
 #
 # 用法：bash tests/e2e.sh
 # 覆盖：列表/树形、单查与批查、启用/停用、幂等、冲突保护（真目录/他人链接/断链）、
-#       残留链接清理、多 agent 与 --agent 定向、glob、JSON、退出码。
+#       残留链接清理、多 agent 与 --agent 定向、glob、JSON、退出码、
+#       import 收编（计划/执行/幂等/拒绝/--copy/软链根/原地补链接）。
 set -uo pipefail
 
 SKM="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/bin/skm"
@@ -168,6 +169,114 @@ echo "== 同名冲突（跨分类）拒绝建链 =="
 mk_skill cat-b/skill-two
 out=$("$SKM" enable cat-b/skill-two); check "拒绝同名建链" "拒绝" "$out"
 check "status 报告链接名冲突" "link_name_collision" "$("$SKM" status)"
+
+echo "== 空仓库：list 给出可执行的下一步 =="
+T2=$(mktemp -d /tmp/skm-e2e-empty-XXXXXX)
+export SKM_BASE_DIR="$T2/repo"; export HOME="$T2/home"
+mkdir -p "$HOME/.agents/skills" "$SKM_BASE_DIR/skills"
+out=$("$SKM" list); check "空仓库时提示 skm import" "skm import" "$out"
+out=$("$SKM" status); check "空仓库时 status 也给提示" "skm import" "$out"
+
+echo "== import：扫 agent 目录 → 入库 + 原位置补链接 =="
+mk_agent_skill() { # $1 = agent 目录下的相对路径
+  local p="$HOME/.agents/skills/$1"
+  mkdir -p "$p"; local n; n=$(basename "$p")
+  printf -- '---\nname: %s\ndescription: agent skill %s\n---\n' "$n" "$n" >"$p/SKILL.md"
+}
+mk_agent_skill straight
+mk_agent_skill cat-x/layered
+out=$("$SKM" import); check "默认只出计划" "将被收进仓库" "$out"
+check "计划说明会补链接" "补链接" "$out"
+assert_true "计划阶段未搬动真身" test -f "$HOME/.agents/skills/straight/SKILL.md"
+assert_true "计划阶段仓库仍空" test -z "$(ls -A "$SKM_BASE_DIR/skills")"
+
+out=$("$SKM" import --yes); check "执行报告已搬动" "已搬动" "$out"
+assert_true "真身已入库（未分类）" test -f "$SKM_BASE_DIR/skills/straight/SKILL.md"
+assert_true "真身已入库（分层→分类）" test -f "$SKM_BASE_DIR/skills/cat-x/layered/SKILL.md"
+assert_true "agent 侧补了链接（扁平）" test -L "$HOME/.agents/skills/straight"
+assert_true "agent 侧补了链接（分层源→规范位置）" test -L "$HOME/.agents/skills/layered"
+assert_true "链接指向仓库真身" test "$(readlink "$HOME/.agents/skills/layered")" = "$SKM_BASE_DIR/skills/cat-x/layered"
+assert_true "源被搬走后不留空分类目录" test ! -e "$HOME/.agents/skills/cat-x"
+assert_true "agent 侧内容可读（链接有效）" test -f "$HOME/.agents/skills/layered/SKILL.md"
+check "收编后 list 认到并算已启用" "✓ layered" "$("$SKM" list)"
+check "收编后无残留/冲突" "没有发现残留" "$("$SKM" issues)"
+
+echo "== import 幂等：再扫一遍无事可做 =="
+# 此时 agent 目录里只剩链接（不是真身）→ 没有任何候选，计划为空
+out=$("$SKM" import --json); check "第二次扫描没有任何候选" '"items": []' "$out"
+out=$("$SKM" import); check "第二次扫描明确说无事可做" "没有需要收编的 skill" "$out"
+
+echo "== import：不覆盖 + 拒绝项 =="
+mkdir -p "$T2/dl/dup"; printf -- '---\nname: dup\ndescription: x\n---\n' >"$T2/dl/dup/SKILL.md"
+out=$("$SKM" import "$T2/dl/dup" --yes); check "指定路径可收编" "已搬动" "$out"
+assert_true "源已搬走" test ! -e "$T2/dl/dup"
+mkdir -p "$T2/dl2/dup"; printf -- '---\nname: dup\ndescription: y\n---\n' >"$T2/dl2/dup/SKILL.md"
+"$SKM" import "$T2/dl2/dup" >/dev/null 2>&1
+assert_true "仓库已有同名时退出码为 1" test $? -eq 1
+assert_true "同名冲突时源未被动" test -f "$T2/dl2/dup/SKILL.md"
+assert_true "同名冲突时仓库未被覆盖" grep -qF "description: x" "$SKM_BASE_DIR/skills/dup/SKILL.md"
+
+echo "== import：--copy 保留源；agent 目录内不给复制（避免第二份真身）=="
+mkdir -p "$T2/dl3/copy-me"; printf -- '---\nname: copy-me\ndescription: x\n---\n' >"$T2/dl3/copy-me/SKILL.md"
+out=$("$SKM" import "$T2/dl3/copy-me" --copy --yes); check "复制模式报告已复制" "已复制" "$out"
+assert_true "复制模式源保留" test -f "$T2/dl3/copy-me/SKILL.md"
+assert_true "复制模式副本入库" test -f "$SKM_BASE_DIR/skills/copy-me/SKILL.md"
+mk_agent_skill copy-no
+out=$("$SKM" import --copy); check "拒绝复制 agent 目录内的源" "拒绝" "$out"
+check "说明为什么拒绝" "第二份真身" "$out"
+assert_true "拒绝后真身仍在原地" test -f "$HOME/.agents/skills/copy-no/SKILL.md"
+
+echo "== import：链接不是真身，跳过不搬 =="
+out=$("$SKM" import); refute "不搬链接" "已搬动" "$out"
+assert_true "链接未被当作 skill" test -L "$HOME/.agents/skills/straight"
+
+echo "== import：指定分类；--dry-run 压过 --yes =="
+mkdir -p "$T2/dl4/boxed"; printf -- '---\nname: boxed\ndescription: x\n---\n' >"$T2/dl4/boxed/SKILL.md"
+"$SKM" import "$T2/dl4/boxed" --category qt-skills --yes >/dev/null
+assert_true "收进指定分类" test -f "$SKM_BASE_DIR/skills/qt-skills/boxed/SKILL.md"
+mkdir -p "$T2/dl5/keepme"; printf -- '---\nname: keepme\ndescription: x\n---\n' >"$T2/dl5/keepme/SKILL.md"
+"$SKM" import "$T2/dl5/keepme" --yes --dry-run >/dev/null
+assert_true "--dry-run 时 --yes 不生效" test -f "$T2/dl5/keepme/SKILL.md"
+assert_true "--dry-run 未入库" test ! -e "$SKM_BASE_DIR/skills/keepme"
+
+echo "== import：显式路径不在配置的 agent 目录下 → 明确告警 =="
+mkdir -p "$T2/uncovered/gamma"; printf -- '---\nname: gamma\ndescription: x\n---\n' >"$T2/uncovered/gamma/SKILL.md"
+out=$("$SKM" import "$T2/uncovered" 2>&1)
+check "告警：不会回填链接" "不会回填链接" "$out"
+
+echo "== import：JSON 可解析 =="
+out=$("$SKM" import --json)
+assert_true "import --json 可解析" python3 -c "import json,sys; json.loads(sys.argv[1])" "$out"
+
+echo "== import：agent 根目录是软链（dotfiles 式布局）=="
+T3=$(mktemp -d /tmp/skm-e2e-link-XXXXXX)
+mkdir -p "$T3/home/.agents" "$T3/repo/skills" "$T3/real/skills"
+ln -s "$T3/real/skills" "$T3/home/.agents/skills"
+mkdir -p "$T3/real/skills/cat/x" "$T3/real/skills/flat"
+printf -- '---\nname: x\ndescription: x\n---\n' >"$T3/real/skills/cat/x/SKILL.md"
+printf -- '---\nname: flat\ndescription: x\n---\n' >"$T3/real/skills/flat/SKILL.md"
+out=$(SKM_BASE_DIR="$T3/repo" HOME="$T3/home" "$SKM" import --yes 2>&1)
+check "软链根下也能收编" "已搬动" "$out"
+assert_true "扁平源原地补链接" test -L "$T3/real/skills/flat"
+assert_true "分类源在规范位置补链接" test -L "$T3/real/skills/x"
+assert_true "空分类目录已收掉" test ! -e "$T3/real/skills/cat"
+assert_true "没有误删 agent 根之外的上层" test -d "$T3/real"
+check "收编后 list 全部已启用" "已启用 2" \
+  "$(SKM_BASE_DIR="$T3/repo" HOME="$T3/home" "$SKM" list)"
+
+echo "== import：链接位被占住 → 拒绝（搬走会让 agent 读不到）=="
+T4=$(mktemp -d /tmp/skm-e2e-occ-XXXXXX)
+mkdir -p "$T4/home/.agents/skills/cat/pdf" "$T4/repo/skills"
+printf -- '---\nname: pdf\ndescription: x\n---\n' >"$T4/home/.agents/skills/cat/pdf/SKILL.md"
+mkdir -p "$T4/home/.agents/skills/pdf"          # 规范链接位是别的真目录
+printf -- '---\nname: pdf\ndescription: other\n---\n' >"$T4/home/.agents/skills/pdf/SKILL.md"
+out=$(SKM_BASE_DIR="$T4/repo" HOME="$T4/home" "$SKM" import 2>&1)
+check "占位时拒绝收编" "拒绝" "$out"
+check "说明搬走会让 agent 读不到" "读不到这个 skill" "$out"
+assert_true "被拒后源真身未动" test -f "$T4/home/.agents/skills/cat/pdf/SKILL.md"
+
+# 恢复主场景的环境，后续用例继续用
+export SKM_BASE_DIR="$T/repo"; export HOME="$T/home"
 
 echo
 echo "临时目录：$T"

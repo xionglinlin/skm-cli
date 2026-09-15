@@ -1,4 +1,4 @@
-"""命令行入口：list / status / enable / disable / agents / config / issues。"""
+"""命令行入口：list / status / import / enable / disable / agents / config / issues。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from . import __version__, actions, config as config_mod, scan
+from . import __version__, actions, config as config_mod, importer, scan
 from .model import LinkState, Skill
 
 EXIT_OK = 0
@@ -232,7 +232,15 @@ def cmd_list(args) -> int:
 
     print(style.dim(f"仓库：{snapshot.store_dir}"))
     if not skills:
-        print(style.yellow("没有可显示的 skill"))
+        if snapshot.skills:
+            print(style.yellow("没有可显示的 skill"))
+        else:
+            # 空仓库是新用户的第一站：这里必须给出可执行的下一步，而不是一句"没有"。
+            # 两种情况都覆盖到 —— 手动拷贝是常规做法，import 是省事的做法。
+            print(style.yellow("仓库里还没有 skill"))
+            print(style.dim(f"  放进去：{snapshot.store_dir}/<名字>/SKILL.md"
+                            f"（分类 = 中间加一层目录）"))
+            print(style.dim("  或扫描已有 skill（会搬进仓库并回填链接）：skm import"))
         return EXIT_OK
 
     width = min(max((len(s.dirname) for s in skills), default=10), 40)
@@ -297,7 +305,13 @@ def cmd_status(args) -> int:
         return EXIT_OK
 
     if not skills and not args.query:
-        print(style.yellow(f"仓库里没有 skill：{snapshot.store_dir}"))
+        if snapshot.skills:
+            # 仓库里有东西，只是被 --enabled / --disabled / --category 滤空了
+            print(style.yellow("没有符合筛选条件的 skill"))
+            return EXIT_OK
+        print(style.yellow(f"仓库里还没有 skill：{snapshot.store_dir}"))
+        print(style.dim("  放进去：<仓库>/<名字>/SKILL.md；"
+                        "或扫描已有 skill：skm import"))
         return EXIT_OK
 
     for skill in skills:
@@ -459,6 +473,166 @@ def cmd_config(args) -> int:
     return EXIT_OK
 
 
+def _import_roots(cfg: config_mod.Config, args) -> list[importer.Root]:
+    """决定扫哪些目录：给了路径就扫路径（可以有多个），否则扫全部 agent 目录。
+
+    agent 目录即使 ``enabled = false`` 也扫 —— "不再向它铺链接"和"不管它的 skill"
+    是两件事；用户的 skill 真身躺在里面，照样该被收进仓库。
+    """
+    if args.paths:
+        roots = []
+        for raw in args.paths:
+            path = Path(os.path.expandvars(os.path.expanduser(raw)))
+            if path.is_symlink():
+                # 根目录本身是软链（例如你把 ~/.agents/skills 链到 dotfiles 里）：
+                # 按真身扫，这样"root 是链接"不会把整次扫描挡掉。
+                path = Path(os.path.realpath(path))
+            roots.append(importer.Root(path, "指定路径", explicit=True))
+        return roots
+    return [
+        importer.Root(
+            Path(os.path.realpath(a.dir)) if a.dir.is_symlink() else a.dir, a.id, False
+        )
+        for a in cfg.agents
+    ]
+
+
+def cmd_import(args) -> int:
+    """收编散落的 skill 真身：扫目录 → 搬进仓库 → 原位置补链接。
+
+    默认**只出计划**，``--yes`` 才动手 —— 这一步会移动真身（别的命令只动链接），
+    先让用户看清"哪个目录要搬到哪"是对数据的最低尊重。
+    """
+    style = Style(sys.stdout)
+    cfg = config_mod.load()
+    roots = _import_roots(cfg, args)
+    if not roots:
+        print("没有可扫描的目录：给出路径，或先让某个 agent 目录存在", file=sys.stderr)
+        print("例：skm import ~/Downloads/skills", file=sys.stderr)
+        return EXIT_USAGE
+
+    plan = importer.plan(cfg, roots, category=args.category, copy=args.copy)
+    for warning in plan.warnings:
+        print(style.yellow(f"⚠ {warning}"), file=sys.stderr)
+    for path, reason in plan.ignored:
+        print(style.dim(f"  忽略 {path}（{reason}）"), file=sys.stderr)
+
+    records: list[importer.Record] = []
+    execute = args.yes and not args.dry_run
+    if execute:
+        try:
+            records = importer.execute(plan, copy=args.copy)
+        except OSError as exc:
+            print(f"无法创建仓库目录 {cfg.store_dir}：{exc.strerror or exc}",
+                  file=sys.stderr)
+            return EXIT_PROBLEM
+
+    if args.json:
+        _emit_json(_import_payload(plan, records))
+        return EXIT_PROBLEM if _import_problems(plan, records) else EXIT_OK
+
+    print(style.dim(f"仓库：{cfg.store_dir}"))
+    print(style.dim("扫描：" + "、".join(
+        str(root.path) if root.explicit else f"{root.origin}（{root.path}）"
+        for root in roots
+    )))
+    print()
+
+    _print_import_plan(style, plan, executed=execute)
+    if execute:
+        _print_import_records(style, records)
+    problems = _import_problems(plan, records)
+
+    print()
+    if execute:
+        imported = [r for r in records
+                    if r.action in (importer.Action.MOVED, importer.Action.COPIED)]
+        print(f"共收进 {len(imported)} 个 skill；"
+              f"仓库现有 {len(scan.scan(cfg).skills)} 个")
+        if imported:
+            print(style.dim("下一步：skm list 确认，skm enable <名字> 启用想用的"))
+        return EXIT_PROBLEM if problems else EXIT_OK
+
+    if plan.importing():
+        print(style.dim("以上为计划，未改动任何文件。执行：skm import --yes"))
+    elif problems:
+        print(style.yellow("没有可执行的项（上面被拒绝的需先处理）"))
+    else:
+        print(style.dim("没有需要收编的 skill"))
+    return EXIT_PROBLEM if problems else EXIT_OK
+
+
+def _import_problems(plan: importer.Plan, records: list[importer.Record]) -> int:
+    problems = plan.count(importer.Verdict.REFUSE)
+    problems += sum(1 for r in records
+                    if r.action in (importer.Action.REFUSED, importer.Action.FAILED,
+                                    importer.Action.PARTIAL))
+    return problems
+
+
+def _print_import_plan(style: Style, plan: importer.Plan, *, executed: bool) -> None:
+    for verdict, title in (
+        (importer.Verdict.IMPORT, "已收进仓库" if executed else "将被收进仓库"),
+        (importer.Verdict.REFUSE, "拒绝"),
+        (importer.Verdict.SKIP, "跳过"),
+    ):
+        items = [i for i in plan.items if i.verdict is verdict]
+        if not items:
+            continue  # 空分组不占版面
+        colour = style.red if verdict is importer.Verdict.REFUSE else style.bold
+        print(colour(f"{title}（{len(items)}）"))
+        width = min(max((len(i.rel) for i in items), default=10), 40)
+        for item in items:
+            print(f"  {item.rel.ljust(width)}  {style.dim('←')} {item.candidate.source}")
+            if item.detail:
+                print(style.dim(f"  {' ' * width}    {item.detail}"))
+            for warning in item.warnings:
+                print(style.yellow(f"  {' ' * width}    ⚠ {warning}"))
+        print()
+
+
+def _print_import_records(style: Style, records: list[importer.Record]) -> None:
+    labels = {
+        importer.Action.MOVED: style.green("已搬动"),
+        importer.Action.COPIED: style.green("已复制"),
+        importer.Action.PARTIAL: style.yellow("已入库，链接未完成"),
+        importer.Action.REFUSED: style.red("拒绝"),
+        importer.Action.FAILED: style.red("失败"),
+    }
+    for record in records:
+        item = record.item
+        print(f"  {labels[record.action]}　{item.rel}  {item.candidate.source}")
+        if record.detail:
+            print(style.dim(f"        {record.detail}"))
+
+
+def _import_payload(plan: importer.Plan, records: list[importer.Record]) -> dict:
+    # 按对象身份取结果：rel 在"同一次扫描出现同名"时并不唯一
+    by_item = {id(r.item): r for r in records}
+    return {
+        "store": str(plan.config.store_dir),
+        "items": [
+            {
+                "rel": item.rel,
+                "source": str(item.candidate.source),
+                "store_path": str(item.store_path),
+                "origin": item.candidate.origin,
+                "verdict": item.verdict.value,
+                "detail": item.detail,
+                "link_path": str(item.link_path) if item.link_path else None,
+                "name": item.candidate.skill.name,
+                "description": item.candidate.skill.description,
+                "warnings": item.warnings,
+                "result": by_item[id(item)].action.value if id(item) in by_item else None,
+                "result_detail": by_item[id(item)].detail if id(item) in by_item else None,
+            }
+            for item in plan.items
+        ],
+        "ignored": [{"path": str(p), "reason": reason} for p, reason in plan.ignored],
+        "warnings": plan.warnings,
+    }
+
+
 def cmd_issues(args) -> int:
     """报告残留链接与冲突；仅在 ``--fix`` 时清理能证明属于本工具的残留链接。"""
     style = Style(sys.stdout)
@@ -535,6 +709,11 @@ _OVERVIEW = """\
 
   <仓库>/<skill>/SKILL.md            → 未分类
   <仓库>/<分类>/<skill>/SKILL.md      → 归入该分类
+
+仓库还是空的？两个办法把 skill 放进去：
+
+  手动：把目录拷进 <仓库>/<名字>/（须含 SKILL.md）
+  扫描：skm import   —— 扫已有 skill 收进仓库，原位置自动补链接
 """
 
 _EXAMPLES = """\
@@ -543,14 +722,18 @@ _EXAMPLES = """\
   # 1. 先看看仓库里有什么、现在都什么状态
   skm list
 
-  # 2. 启用单个 / 一整类
+  # 2. 仓库空着？扫一遍已有 skill 收进来（先看计划，再加 --yes）
+  skm import
+  skm import --yes
+
+  # 3. 启用单个 / 一整类
   skm enable pdf
   skm enable --category qt-skills
 
-  # 3. 确认没问题再动手（-n 只显示不改）
+  # 4. 确认没问题再动手（-n 只显示不改）
   skm disable 'qt-*' -n
 
-  # 4. 停用
+  # 5. 停用
   skm disable pdf
 
 查询示例：
@@ -561,6 +744,13 @@ _EXAMPLES = """\
   skm list --category security-skills 只看某个分类
   skm status pdf qt-qml               批量查看详细状态
   skm status --json | jq .skills      机器可读输出
+
+收编示例：
+
+  skm import                          扫 agent 目录，只出计划
+  skm import ~/Downloads/skills       扫指定目录（可给多个）
+  skm import ~/s --category qt --yes  收进指定分类并执行
+  skm import --copy --yes             复制而非移动（草稿目录用）
 
 启用 / 停用示例：
 
@@ -762,6 +952,38 @@ def build_parser() -> argparse.ArgumentParser:
     cfg.add_argument("--base-dir", metavar="目录", help="init 时使用的仓库根目录")
     cfg.add_argument("--force", action="store_true", help="init 时覆盖已有文件")
     cfg.set_defaults(func=cmd_config)
+
+    imp = sub.add_parser(
+        "import", aliases=["scan"], help="扫描已有 skill 并收进仓库",
+        description="扫描目录，把找到的 skill 真身收进仓库 —— 给「新装好、仓库还空着」"
+                    "和「skill 散落在各处」两种情况用。\n"
+                    "不给路径时扫配置里的全部 agent 目录（含 enabled = false 的）。\n"
+                    "\n"
+                    "真身原本就在 agent 目录里时，搬走后会在原位置补一条链接：\n"
+                    "agent 读到的内容分毫不变，仓库从此才是真身唯一所在。",
+        epilog="例：skm import                     扫 agent 目录，先出计划（不改动）\n"
+               "    skm import --yes               确认后收编\n"
+               "    skm import ~/Downloads/skills  扫指定目录（可给多个）\n"
+               "    skm import ~/s --category qt   收进指定分类\n"
+               "    skm import -n                  只出计划（同缺省）\n"
+               "    skm import --copy --yes        复制而不是移动（草稿目录用）\n"
+               "    skm import --json | jq .items  机器可读\n"
+               "\n"
+               "安全性：仓库里已有同名条目、同一次扫描出现两处同名真身 —— 一律拒绝，\n"
+               "不覆盖；符号链接不是真身，跳过不搬。",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    imp.add_argument("paths", nargs="*", metavar="路径",
+                     help="要扫描的目录（可给多个）；缺省 = 配置里的全部 agent 目录")
+    imp.add_argument("--yes", "-y", action="store_true",
+                     help="真的执行（缺省只出计划，因为这一步会移动真身）")
+    imp.add_argument("--copy", action="store_true",
+                     help="复制而不是移动（源目录保留，不回填链接）")
+    imp.add_argument("--category", "-c", metavar="分类",
+                     help="收进仓库的哪个分类（缺省沿用源目录的分类结构）")
+    imp.add_argument("--dry-run", "-n", action="store_true", help="只出计划，不改动")
+    imp.add_argument("--json", action="store_true", help="输出 JSON")
+    imp.set_defaults(func=cmd_import, command="import")
 
     issues = sub.add_parser(
         "issues", aliases=["doctor"], help="报告残留链接与冲突",
