@@ -48,6 +48,12 @@ if [ "$UNINSTALL" -eq 1 ]; then
       rm -f "$candidate" && info "已删除 $candidate" && removed=1
     fi
   done
+  # --binary 会额外把实现复制到 <BIN_DIR>/skm-cli；不清掉就会留下孤儿目录，
+  # 而它的名字（skm-cli）会让用户以为是别的程序的安装结果。
+  payload="${BIN_DIR}/skm-cli"
+  if [ -d "$payload" ]; then
+    rm -rf "$payload" && info "已删除自包含安装目录 $payload" && removed=1
+  fi
   [ "$removed" -eq 1 ] || info "没找到已安装的 skm 命令"
   info "数据目录保持不动：${REPO_DIR}（要删请自行确认后 rm -rf）"
   exit 0
