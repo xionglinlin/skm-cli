@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# skm —— 从源码直接运行的启动脚本（不装任何东西，克隆即可用）
+#
+# 本脚本只负责定位实现并交给 python3，不改变数据位置：
+#   实现   <脚本所在目录>/../src/skm/    ← 由脚本自身位置推导，可安全做软链
+#   仓库   ${SKM_BASE_DIR:-~/.skill-manager}/skills/
+#   配置   ${SKM_BASE_DIR:-~/.skill-manager}/config.toml
+#
+# 装到 PATH（任选其一）：
+#   ln -s "$PWD/bin/skm" ~/.local/bin/skm      # 符号链接：会解析到脚本真身
+#   bash install.sh                            # 或让安装脚本替你决定
+set -euo pipefail
+
+SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
+ROOT="$(dirname -- "$(dirname -- "${SELF}")")"
+
+if [[ ! -d "${ROOT}/src/skm" ]]; then
+  echo "skm: 找不到实现目录 ${ROOT}/src/skm" >&2
+  exit 1
+fi
+
+PYTHON="${SKM_PYTHON:-python3}"
+if ! command -v "${PYTHON}" >/dev/null 2>&1; then
+  echo "skm: 找不到 ${PYTHON}（可用 SKM_PYTHON 指定解释器）" >&2
+  exit 1
+fi
+
+# Python 3.11+ 才有 tomllib；先给出明确提示，避免 3.10 上报 ImportError
+if ! "${PYTHON}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+  ver="$("${PYTHON}" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  echo "skm: 需要 Python 3.11 或更新版本（当前 ${PYTHON} 是 ${ver}）" >&2
+  exit 1
+fi
+
+exec env PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+  "${PYTHON}" -m skm "$@"

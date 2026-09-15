@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "skm-cli"
+version = "0.1.0"
+description = "本地 skill 仓库管理器：管理 skill 对各个 AI agent（OMP / Codex / Claude Code）的启用与停用"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "xionglinlin", email = "xionglinlin@uniontech.com" }]
+keywords = ["skill", "agent", "claude-code", "codex", "omp", "symlink", "cli"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Utilities",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/xionglinlin/skm-cli"
+Issues = "https://github.com/xionglinlin/skm-cli/issues"
+
+[project.scripts]
+skm = "skm.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skm"]
